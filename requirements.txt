@@ -1,0 +1,11 @@
+PyQt5>=5.15.0
+pyqt-fluent-widgets>=1.0.0
+cupy-cuda12x>=12.0.0
+numpy>=1.24.0
+imageio>=2.31.0
+tifffile>=2023.0.0
+tqdm>=4.65.0
+scipy>=1.10.0
+Pillow>=10.0.0
+matplotlib>=3.7.0
+pyinstaller>=6.0.0
