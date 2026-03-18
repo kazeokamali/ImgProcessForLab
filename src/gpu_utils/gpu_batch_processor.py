@@ -281,5 +281,103 @@ class GPUBatchProcessor:
         del divide_img_gpu
         cp.get_default_memory_pool().free_all_blocks()
 
+    def process_blackline_only_batch(
+        self,
+        input_paths: List[str],
+        output_folder: str,
+        min_val: float,
+        max_val: float,
+        blackline_lp: float,
+        if_process_all: bool = False,
+        blacklines_columns: Optional[List[int]] = None,
+        progress_callback: Optional[Callable[[int, int, dict], None]] = None,
+    ):
+        os.makedirs(output_folder, exist_ok=True)
+
+        processed_count = 0
+        failed_count = 0
+        total_images = len(input_paths)
+        index = 0
+
+        while index < total_images:
+            batch_end = min(index + self.batch_size, total_images)
+            batch_paths = input_paths[index:batch_end]
+
+            try:
+                gpu_images = self._load_batch_to_gpu(batch_paths)
+
+                self.batch_delete_blacklines_inRange(
+                    gpu_images,
+                    min_val=min_val,
+                    max_val=max_val,
+                    blackline_lp=blackline_lp,
+                    if_process_all=if_process_all,
+                    blacklines_columns=blacklines_columns,
+                )
+
+                output_paths = []
+                for path in batch_paths:
+                    basename = os.path.basename(path)
+                    if basename.lower().endswith(".tiff"):
+                        output_path = os.path.join(
+                            output_folder, basename.replace(".tiff", "_.tiff")
+                        )
+                    elif basename.lower().endswith(".tif"):
+                        output_path = os.path.join(
+                            output_folder, basename.replace(".tif", "_.tif")
+                        )
+                    else:
+                        output_path = os.path.join(output_folder, basename)
+                    output_paths.append(output_path)
+
+                self._save_batch_to_disk(gpu_images, output_paths)
+
+                processed_count += len(gpu_images)
+                index = batch_end
+
+                if self.memory_manager is not None:
+                    memory_info = self.memory_manager.get_memory_info()
+                else:
+                    memory_info = {
+                        "used_mb": 0.0,
+                        "total_mb": 0.0,
+                        "usage_percent": 0.0,
+                    }
+
+                if progress_callback:
+                    progress_callback(processed_count, total_images, memory_info)
+                elif self.progress_callback:
+                    self.progress_callback(processed_count, total_images, memory_info)
+
+                for stream in self.streams:
+                    stream.synchronize()
+
+                del gpu_images
+                cp.get_default_memory_pool().free_all_blocks()
+
+            except cp.cuda.memory.OutOfMemoryError:
+                if hasattr(self, "text") and self.text is not None:
+                    self.text.append(
+                        f'<span style="color: red;">警告: 显存不足，批次大小 {len(batch_paths)} 太大，尝试减小...</span>'
+                    )
+                if self.batch_size > 1:
+                    self.batch_size = max(1, self.batch_size // 2)
+                    if hasattr(self, "text") and self.text is not None:
+                        self.text.append(
+                            f'<span style="color: orange;">自动调整批次大小为: {self.batch_size}</span>'
+                        )
+                    continue
+                if hasattr(self, "text") and self.text is not None:
+                    self.text.append(
+                        '<span style="color: red;">错误: 批次大小已为1，仍然显存不足！</span>'
+                    )
+                raise
+            except Exception:
+                # Fallback: keep going and mark this whole batch as failed.
+                failed_count += len(batch_paths)
+                index = batch_end
+
+        return processed_count, failed_count
+
     def get_memory_info(self) -> dict:
         return self.memory_manager.get_memory_info()

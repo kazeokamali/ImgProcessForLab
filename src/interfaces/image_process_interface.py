@@ -1,48 +1,55 @@
+import csv
 import os
 import sys
-import csv
+
+import numpy as np
+import tqdm
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+from PIL import Image
 from PyQt5.QtCore import QSize, Qt
 from PyQt5.QtGui import QFont, QIcon, QPixmap
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
+    QButtonGroup,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDockWidget,
+    QDoubleSpinBox,
     QFileDialog,
     QFileSystemModel,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QRadioButton,
+    QScrollArea,
+    QSlider,
+    QSpinBox,
     QTextEdit,
     QTreeView,
     QVBoxLayout,
     QWidget,
-    QRadioButton,
-    QButtonGroup,
-    QSpinBox,
-    QCheckBox,
-    QDoubleSpinBox,
 )
-import tqdm
-from PIL import Image
-from PyQt5.QtWidgets import QSlider
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
-import numpy as np
+
+from src.gpu_utils.cuda_check import CUDA_AVAILABLE
+from src.gpu_utils.gpu_batch_operations import GPUBatchOperations
 from src.gpu_utils.gpu_image_process import (
     GPUImageProcess,
+    gpu_convert_bit_depth,
     gpu_convert_raw_to_tiff,
     gpu_crop_image,
-    gpu_rotate_image,
-    gpu_sharpen_edge,
     gpu_negative_log,
+    gpu_rotate_image,
     gpu_rotate_r90,
+    gpu_sharpen_edge,
 )
-from src.gpu_utils.gpu_batch_operations import GPUBatchOperations
+from src.interfaces.ui_theme import apply_interface_theme, set_button_role
 
 
 def reset_layout(layout):
@@ -79,19 +86,19 @@ class IconTextButton(QPushButton):
 class SetImageSizeDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Set Image Size")
+        self.setWindowTitle("设置图像尺寸")
         self.layout = QVBoxLayout()
-        self.width_label = QLabel("Image Width:")
+        self.width_label = QLabel("图像宽度:")
         self.width_input = QLineEdit(self)
         self.width_input.setText("2340")
         self.layout.addWidget(self.width_label)
         self.layout.addWidget(self.width_input)
-        self.height_label = QLabel("Image Height:")
+        self.height_label = QLabel("图像高度:")
         self.height_input = QLineEdit(self)
         self.height_input.setText("2882")
         self.layout.addWidget(self.height_label)
         self.layout.addWidget(self.height_input)
-        self.ok_button = QPushButton("OK")
+        self.ok_button = QPushButton("确定")
         self.ok_button.clicked.connect(self.accept)
         self.layout.addWidget(self.ok_button)
         self.setLayout(self.layout)
@@ -105,13 +112,13 @@ class SetImageSizeDialog(QDialog):
 class RotateAngleDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Rotate Angle")
+        self.setWindowTitle("旋转角度")
         self.layout = QVBoxLayout()
         self.angle_label = QLabel("逆时针旋转角度:")
         self.angle_input = QLineEdit(self)
         self.layout.addWidget(self.angle_label)
         self.layout.addWidget(self.angle_input)
-        self.ok_button = QPushButton("OK")
+        self.ok_button = QPushButton("确定")
         self.ok_button.clicked.connect(self.accept)
         self.layout.addWidget(self.ok_button)
         self.setLayout(self.layout)
@@ -123,25 +130,25 @@ class RotateAngleDialog(QDialog):
 class CropCoordinatesDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Crop Image")
+        self.setWindowTitle("图像裁剪")
         self.layout = QVBoxLayout()
-        self.x1_label = QLabel("Top left X:")
+        self.x1_label = QLabel("左上角 X:")
         self.x1_input = QLineEdit(self)
         self.layout.addWidget(self.x1_label)
         self.layout.addWidget(self.x1_input)
-        self.y1_label = QLabel("Top left Y:")
+        self.y1_label = QLabel("左上角 Y:")
         self.y1_input = QLineEdit(self)
         self.layout.addWidget(self.y1_label)
         self.layout.addWidget(self.y1_input)
-        self.x2_label = QLabel("Bottom right X:")
+        self.x2_label = QLabel("右下角 X:")
         self.x2_input = QLineEdit(self)
         self.layout.addWidget(self.x2_label)
         self.layout.addWidget(self.x2_input)
-        self.y2_label = QLabel("Bottom right Y:")
+        self.y2_label = QLabel("右下角 Y:")
         self.y2_input = QLineEdit(self)
         self.layout.addWidget(self.y2_label)
         self.layout.addWidget(self.y2_input)
-        self.ok_button = QPushButton("OK")
+        self.ok_button = QPushButton("确定")
         self.ok_button.clicked.connect(self.accept)
         self.layout.addWidget(self.ok_button)
         self.setLayout(self.layout)
@@ -165,11 +172,12 @@ class ImageInfoDialog(QDialog):
         self.setFixedSize(900, 600)
 
     def load_image(self):
-        if self.image_path.endswith('.raw'):
+        if self.image_path.endswith(".raw"):
             raw_data = np.fromfile(self.image_path, dtype=np.uint16)
             self.image_data = raw_data.reshape((2882, 2340))
         else:
             from PIL import Image as PILImage
+
             img = PILImage.open(self.image_path)
             self.image_data = np.array(img)
 
@@ -204,12 +212,14 @@ class ImageInfoDialog(QDialog):
 
     def plot_histogram(self):
         ax = self.figure.add_subplot(111)
-        
-        hist, bins, patches = ax.hist(self.image_data.flatten(), bins=100, edgecolor='black', alpha=0.7)
-        
-        ax.set_xlabel('像素值')
-        ax.set_ylabel('数量')
-        ax.set_title('像素值分布直方图')
+
+        hist, bins, patches = ax.hist(
+            self.image_data.flatten(), bins=100, edgecolor="black", alpha=0.7
+        )
+
+        ax.set_xlabel("像素值")
+        ax.set_ylabel("数量")
+        ax.set_title("像素值分布直方图")
         ax.grid(True, alpha=0.3)
 
         max_count = np.max(hist)
@@ -218,8 +228,15 @@ class ImageInfoDialog(QDialog):
         for i, count in enumerate(hist):
             if count < threshold:
                 x_pos = bins[i] + (bins[1] - bins[0]) / 2
-                ax.text(x_pos, count, str(int(count)), 
-                       ha='center', va='bottom', fontsize=8, rotation=90)
+                ax.text(
+                    x_pos,
+                    count,
+                    str(int(count)),
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                    rotation=90,
+                )
 
         self.figure.tight_layout()
         self.canvas.draw()
@@ -317,7 +334,7 @@ class ThresholdDialog(QDialog):
 
     def on_mode_changed(self):
         is_percent = self.percent_radio.isChecked()
-        
+
         for i in range(self.percent_layout.count()):
             widget = self.percent_layout.itemAt(i).widget()
             if widget:
@@ -331,7 +348,7 @@ class ThresholdDialog(QDialog):
     def get_threshold_params(self):
         mode = "percent" if self.percent_radio.isChecked() else "value"
         radius = self.radius_spinbox.value()
-        
+
         if mode == "percent":
             min_percent = float(self.min_percent_input.text())
             max_percent = float(self.max_percent_input.text())
@@ -429,12 +446,55 @@ class SmallRegionDialog(QDialog):
         return self.pixel_spin.value()
 
 
+class BitDepthDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("位深转换设置")
+        self.setFixedSize(360, 180)
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("目标位深:"))
+
+        self.bit_depth_combo = QComboBox(self)
+        self.bit_depth_combo.addItems(["8 bit", "16 bit", "32 bit (float)"])
+        self.bit_depth_combo.setCurrentIndex(1)
+        row.addWidget(self.bit_depth_combo)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        hint = QLabel("输入图像位深将自动识别，输出统一写为 TIFF。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addWidget(hint)
+
+        button_layout = QHBoxLayout()
+        ok_button = QPushButton("确定")
+        ok_button.clicked.connect(self.accept)
+        cancel_button = QPushButton("取消")
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(ok_button)
+        button_layout.addWidget(cancel_button)
+        layout.addLayout(button_layout)
+
+    def get_target_bit_depth(self):
+        text = self.bit_depth_combo.currentText()
+        if text.startswith("8"):
+            return 8
+        if text.startswith("16"):
+            return 16
+        return 32
+
+
 class ImageProcessInterface(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent=parent)
         self.setObjectName("ImageProcessInterface")
-        self.setWindowTitle("GPU Image Process")
+        self.setWindowTitle("GPU图像处理")
         self.setGeometry(500, 500, 1400, 800)
+        apply_interface_theme(self)
 
         self.text = QTextEdit(self)
         self.text.setReadOnly(True)
@@ -450,7 +510,7 @@ class ImageProcessInterface(QMainWindow):
             self.tree_view.setColumnHidden(i, True)
         self.tree_view.setMinimumWidth(400)
 
-        self.dock_widget = QDockWidget("File System", self)
+        self.dock_widget = QDockWidget("文件系统", self)
         self.dock_widget.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         self.dock_widget.setMinimumWidth(400)
 
@@ -469,8 +529,11 @@ class ImageProcessInterface(QMainWindow):
         self.select_output_button.setFixedSize(150, 70)
         self.select_output_button.clicked.connect(self.on_select_output_clicked)
 
-        self.cancel_button = IconTextButton("Clear", "./resource/icons/clear.png", self)
+        self.cancel_button = IconTextButton(
+            "清空选择", "./resource/icons/clear.png", self
+        )
         self.cancel_button.setFixedSize(150, 70)
+        set_button_role(self.cancel_button, "danger")
         self.cancel_button.clicked.connect(self.on_cancel_clicked)
 
         self.set_image_size_button = IconTextButton(
@@ -483,94 +546,131 @@ class ImageProcessInterface(QMainWindow):
             "Raw转Tiff", "./resource/icons/convert_dtype.png", self
         )
         self.convert_button.setFixedSize(150, 70)
+        set_button_role(self.convert_button, "primary")
         self.convert_button.clicked.connect(self.on_convert_clicked)
 
-        self.crop_button = IconTextButton(
-            "裁剪图像", "./resource/icons/crop.png", self
+        self.convert_bit_depth_button = IconTextButton(
+            "位深转换", "./resource/icons/bit_convert.png", self
         )
+        self.convert_bit_depth_button.setFixedSize(150, 70)
+        set_button_role(self.convert_bit_depth_button, "primary")
+        self.convert_bit_depth_button.clicked.connect(self.on_convert_bit_depth_clicked)
+
+        self.crop_button = IconTextButton("裁剪图像", "./resource/icons/crop.png", self)
         self.crop_button.setFixedSize(150, 70)
+        set_button_role(self.crop_button, "primary")
         self.crop_button.clicked.connect(self.on_crop_clicked)
 
         self.rotate_r90_button = IconTextButton(
             "顺时针90°", "./resource/icons/R_spin.png", self
         )
         self.rotate_r90_button.setFixedSize(150, 70)
+        set_button_role(self.rotate_r90_button, "primary")
         self.rotate_r90_button.clicked.connect(self.on_rotate_r90_clicked)
 
         self.rotate_any_button = IconTextButton(
             "逆时针任意", "./resource/icons/L_spin.png", self
         )
         self.rotate_any_button.setFixedSize(150, 70)
+        set_button_role(self.rotate_any_button, "primary")
         self.rotate_any_button.clicked.connect(self.on_rotate_any_clicked)
 
         self.sharpen_button = IconTextButton(
             "边缘锐化", "./resource/icons/sharpen.png", self
         )
         self.sharpen_button.setFixedSize(150, 70)
+        set_button_role(self.sharpen_button, "primary")
         self.sharpen_button.clicked.connect(self.on_sharpen_clicked)
 
         self.negative_log_button = IconTextButton(
             "负对数", "./resource/icons/log.png", self
         )
         self.negative_log_button.setFixedSize(150, 70)
+        set_button_role(self.negative_log_button, "primary")
         self.negative_log_button.clicked.connect(self.on_negative_log_clicked)
 
         self.info_button = IconTextButton(
-            "Info", "./resource/icons/info.png", self
+            "图像信息", "./resource/icons/img_info.png", self
         )
         self.info_button.setFixedSize(150, 70)
         self.info_button.clicked.connect(self.on_info_clicked)
 
         self.threshold_button = IconTextButton(
-            "阈值划分", "./resource/icons/threshold.png", self
+            "阈值划分", "./resource/icons/img_seg.png", self
         )
         self.threshold_button.setFixedSize(150, 70)
+        set_button_role(self.threshold_button, "primary")
         self.threshold_button.clicked.connect(self.on_threshold_clicked)
 
         self.binarize_button = IconTextButton(
             "图像二值化", "./resource/icons/check.png", self
         )
         self.binarize_button.setFixedSize(150, 70)
+        set_button_role(self.binarize_button, "primary")
         self.binarize_button.clicked.connect(self.on_binarize_clicked)
 
         self.remove_small_region_button = IconTextButton(
             "小区域删除", "./resource/icons/change.png", self
         )
         self.remove_small_region_button.setFixedSize(150, 70)
-        self.remove_small_region_button.clicked.connect(self.on_remove_small_region_clicked)
+        set_button_role(self.remove_small_region_button, "primary")
+        self.remove_small_region_button.clicked.connect(
+            self.on_remove_small_region_clicked
+        )
 
         self.extract_transition_button = IconTextButton(
             "突变点提取", "./resource/icons/progress.png", self
         )
         self.extract_transition_button.setFixedSize(150, 70)
-        self.extract_transition_button.clicked.connect(self.on_extract_transition_clicked)
+        set_button_role(self.extract_transition_button, "primary")
+        self.extract_transition_button.clicked.connect(
+            self.on_extract_transition_clicked
+        )
 
-        button_layout = QVBoxLayout()
-        button_layout.addWidget(self.select_input_button)
-        button_layout.addWidget(self.select_output_button)
-        button_layout.addWidget(self.set_image_size_button)
-        button_layout.addWidget(self.cancel_button)
-        button_layout.addWidget(self.convert_button)
-        button_layout.addWidget(self.crop_button)
-        button_layout.addWidget(self.rotate_r90_button)
-        button_layout.addWidget(self.rotate_any_button)
-        button_layout.addWidget(self.sharpen_button)
-        button_layout.addWidget(self.negative_log_button)
-        button_layout.addWidget(self.info_button)
-        button_layout.addWidget(self.threshold_button)
-        button_layout.addWidget(self.binarize_button)
-        button_layout.addWidget(self.remove_small_region_button)
-        button_layout.addWidget(self.extract_transition_button)
-        button_layout.addStretch(1)
+        controls_widget = QWidget()
+        controls_layout = QVBoxLayout(controls_widget)
 
-        mid_central_layout = QVBoxLayout()
+        button_grid = QGridLayout()
+        button_grid.setHorizontalSpacing(8)
+        button_grid.setVerticalSpacing(8)
+        buttons = [
+            self.select_input_button,
+            self.select_output_button,
+            self.set_image_size_button,
+            self.info_button,
+            self.cancel_button,
+            self.convert_button,
+            self.convert_bit_depth_button,
+            self.crop_button,
+            self.rotate_r90_button,
+            self.rotate_any_button,
+            self.sharpen_button,
+            self.negative_log_button,
+            self.threshold_button,
+            self.binarize_button,
+            self.remove_small_region_button,
+            self.extract_transition_button,
+        ]
+        for idx, btn in enumerate(buttons):
+            row = idx // 4
+            col = idx % 4
+            button_grid.addWidget(btn, row, col)
+        controls_layout.addLayout(button_grid)
+
         self.parameter_window = QVBoxLayout()
-        mid_central_layout.addWidget(self.text)
-        button_layout.addLayout(self.parameter_window)
+        controls_layout.addLayout(self.parameter_window)
+        controls_layout.addStretch(1)
 
-        central_layout.addWidget(self.tree_view)
-        central_layout.addLayout(mid_central_layout)
-        central_layout.addLayout(button_layout)
+        controls_scroll = QScrollArea()
+        controls_scroll.setWidgetResizable(True)
+        controls_scroll.setWidget(controls_widget)
+
+        right_panel = QVBoxLayout()
+        right_panel.addWidget(QLabel("处理日志"))
+        right_panel.addWidget(self.text, 2)
+        right_panel.addWidget(controls_scroll, 3)
+
+        central_layout.addLayout(right_panel, 1)
 
         self.setCentralWidget(central_widget)
         self.dock_widget.setWidget(self.tree_view)
@@ -654,25 +754,25 @@ class ImageProcessInterface(QMainWindow):
 
     def on_select_input_clicked(self):
         if self.current_path:
-            self.text.append(f"Input Path: {self.current_path}\n")
+            self.text.append(f"输入路径: {self.current_path}\n")
             self.input_path = self.current_path
             self.current_path = None
         else:
-            QMessageBox.warning(self, "No Selection", "No folder selected.")
+            QMessageBox.warning(self, "未选择", "请先在左侧选择文件夹。")
 
     def on_select_output_clicked(self):
         if self.current_path:
-            self.text.append(f"Output Path: {self.current_path}\n")
+            self.text.append(f"输出路径: {self.current_path}\n")
             self.output_path = self.current_path
             self.current_path = None
         else:
-            QMessageBox.warning(self, "No Selection", "No folder selected.")
+            QMessageBox.warning(self, "未选择", "请先在左侧选择文件夹。")
 
     def on_cancel_clicked(self):
         self.input_path = None
         self.output_path = None
-        QMessageBox.information(self, "Cleared", "Selection cleared.")
-        self.text.append(f"ALL Path: None ")
+        QMessageBox.information(self, "已清空", "已清空输入/输出选择。")
+        self.text.append("全部路径: 无")
         self.reset()
         self.text.append(f"-----------------------------------------------------------")
 
@@ -683,12 +783,15 @@ class ImageProcessInterface(QMainWindow):
             if width and height:
                 self.image_width = width
                 self.image_height = height
-                self.text.append(f"Set image size to: {self.image_width} x {self.image_height}")
+                self.text.append(
+                    f"图像尺寸设置为: {self.image_width} x {self.image_height}"
+                )
 
     def on_convert_clicked(self):
         if not self.input_path or not self.output_path:
-            QMessageBox.warning(self, "Warning", "Please select input and output folders.")
+            QMessageBox.warning(self, "警告", "请先选择输入和输出文件夹。")
             return
+        self.text.append(f"Raw转Tiff 后端: {'CUDA' if CUDA_AVAILABLE else 'CPU回退'}")
 
         image_paths = [
             os.path.join(self.input_path, img)
@@ -696,23 +799,77 @@ class ImageProcessInterface(QMainWindow):
             if img.endswith(".raw")
         ]
 
-        for image in tqdm.tqdm(image_paths, desc="Converting"):
+        for image in tqdm.tqdm(image_paths, desc="转换中"):
             try:
-                gpu_convert_raw_to_tiff(image, self.output_path, self.image_width, self.image_height)
+                gpu_convert_raw_to_tiff(
+                    image, self.output_path, self.image_width, self.image_height
+                )
                 self.text.append(
-                    f'<span style="color: green;"> Successfully converted {image}</span>'
+                    f'<span style="color: green;">转换成功: {image}</span>'
                 )
             except Exception as e:
                 self.text.append(
-                    f'<span style="color: red;">Error processing {image}: {str(e)} </span>'
+                    f'<span style="color: red;">处理失败 {image}: {str(e)}</span>'
                 )
 
         self.text.append(f"\n")
 
+    def on_convert_bit_depth_clicked(self):
+        if not self.input_path or not self.output_path:
+            QMessageBox.warning(self, "警告", "请先选择输入和输出文件夹。")
+            return
+
+        image_paths = self._collect_image_paths()
+        if not image_paths:
+            QMessageBox.warning(
+                self, "警告", "输入文件夹中没有找到 .tif/.tiff/.raw 图像。"
+            )
+            return
+
+        dialog = BitDepthDialog(self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        target_bit_depth = dialog.get_target_bit_depth()
+        backend = "CUDA" if CUDA_AVAILABLE else "CPU回退"
+        self.text.append(f"位深转换后端: {backend} | 目标位深: {target_bit_depth} bit")
+
+        success_count = 0
+        fail_count = 0
+        for image_path in tqdm.tqdm(
+            image_paths, desc=f"Converting to {target_bit_depth}bit"
+        ):
+            try:
+                output_path, src_dtype, dst_dtype = gpu_convert_bit_depth(
+                    image_path,
+                    self.output_path,
+                    target_bit_depth,
+                    self.image_width,
+                    self.image_height,
+                )
+                success_count += 1
+                self.text.append(
+                    f'<span style="color: green;">位深转换成功: '
+                    f"{os.path.basename(image_path)} ({src_dtype} -> {dst_dtype})</span>"
+                )
+                self.text.append(f"  输出: {output_path}")
+            except Exception as e:
+                fail_count += 1
+                self.text.append(
+                    f'<span style="color: red;">位深转换失败: '
+                    f"{os.path.basename(image_path)}, 原因: {e}</span>"
+                )
+
+        self.text.append(
+            f'<span style="color: green;">位深转换完成: 成功 {success_count}，失败 {fail_count}</span>'
+        )
+        self.text.append("\n")
+
     def on_crop_clicked(self):
         if not self.input_path or not self.output_path:
-            QMessageBox.warning(self, "Warning", "Please select input and output folders.")
+            QMessageBox.warning(self, "警告", "请先选择输入和输出文件夹。")
             return
+        self.text.append(f"裁剪 后端: {'CUDA' if CUDA_AVAILABLE else 'CPU回退'}")
 
         dialog = CropCoordinatesDialog(self)
         if dialog.exec_() == QDialog.Accepted:
@@ -724,21 +881,21 @@ class ImageProcessInterface(QMainWindow):
                 if img.endswith(".tif") or img.endswith(".tiff")
             ]
 
-            for image in tqdm.tqdm(image_paths, desc="Cropping"):
+            for image in tqdm.tqdm(image_paths, desc="裁剪中"):
                 try:
                     gpu_crop_image(image, self.output_path, x1, y1, x2, y2)
                     self.text.append(
-                        f'<span style="color: green;"> Successfully cropped {image}</span>'
+                        f'<span style="color: green;">裁剪成功: {image}</span>'
                     )
                 except Exception as e:
                     self.text.append(
-                        f'<span style="color: red;">Error processing {image}: {str(e)} </span>'
+                        f'<span style="color: red;">处理失败 {image}: {str(e)}</span>'
                     )
         self.text.append(f"\n")
 
     def on_rotate_r90_clicked(self):
         if not self.input_path or not self.output_path:
-            QMessageBox.warning(self, "Warning", "Please select input and output folders.")
+            QMessageBox.warning(self, "警告", "请先选择输入和输出文件夹。")
             return
 
         image_paths = [
@@ -749,7 +906,9 @@ class ImageProcessInterface(QMainWindow):
 
         def progress_callback(processed, total):
             if processed % 10 == 0:
-                self.text.append(f"进度: {processed}/{total} ({processed/total*100:.1f}%)")
+                self.text.append(
+                    f"进度: {processed}/{total} ({processed/total*100:.1f}%)"
+                )
 
         self.batch_operations.set_progress_callback(progress_callback)
         self.batch_operations.batch_rotate_r90(image_paths, self.output_path)
@@ -758,8 +917,9 @@ class ImageProcessInterface(QMainWindow):
 
     def on_rotate_any_clicked(self):
         if not self.input_path or not self.output_path:
-            QMessageBox.warning(self, "Warning", "Please select input and output folders.")
+            QMessageBox.warning(self, "警告", "请先选择输入和输出文件夹。")
             return
+        self.text.append(f"任意角旋转 后端: {'CUDA' if CUDA_AVAILABLE else 'CPU回退'}")
 
         dialog = RotateAngleDialog(self)
         if dialog.exec_() == QDialog.Accepted:
@@ -771,21 +931,21 @@ class ImageProcessInterface(QMainWindow):
                 if img.endswith(".tif") or img.endswith(".tiff")
             ]
 
-            for image in tqdm.tqdm(image_paths, desc="Rotating"):
+            for image in tqdm.tqdm(image_paths, desc="旋转中"):
                 try:
                     gpu_rotate_image(image, self.output_path, angle)
                     self.text.append(
-                        f'<span style="color: green;">Successfully rotated {image}</span>'
+                        f'<span style="color: green;">旋转成功: {image}</span>'
                     )
                 except Exception as e:
                     self.text.append(
-                        f'<span style="color: red;">Error processing {image}: {str(e)}</span>'
+                        f'<span style="color: red;">处理失败 {image}: {str(e)}</span>'
                     )
         self.text.append(f"\n")
 
     def on_sharpen_clicked(self):
         if not self.input_path or not self.output_path:
-            QMessageBox.warning(self, "Warning", "Please select input and output folders.")
+            QMessageBox.warning(self, "警告", "请先选择输入和输出文件夹。")
             return
 
         image_paths = [
@@ -794,22 +954,22 @@ class ImageProcessInterface(QMainWindow):
             if img.endswith(".tif") or img.endswith(".tiff")
         ]
 
-        for image in tqdm.tqdm(image_paths, desc="Sharpening"):
+        for image in tqdm.tqdm(image_paths, desc="锐化中"):
             try:
                 gpu_sharpen_edge(image, self.output_path)
                 self.text.append(
-                    f'<span style="color: green;"> Successfully sharpened {image}</span>'
+                    f'<span style="color: green;">锐化成功: {image}</span>'
                 )
             except Exception as e:
                 self.text.append(
-                    f'<span style="color: red;">Error processing {image}: {str(e)} </span>'
+                    f'<span style="color: red;">处理失败 {image}: {str(e)}</span>'
                 )
 
         self.text.append(f"\n")
 
     def on_negative_log_clicked(self):
         if not self.input_path or not self.output_path:
-            QMessageBox.warning(self, "Warning", "Please select input and output folders.")
+            QMessageBox.warning(self, "警告", "请先选择输入和输出文件夹。")
             return
 
         image_paths = [
@@ -820,7 +980,9 @@ class ImageProcessInterface(QMainWindow):
 
         def progress_callback(processed, total):
             if processed % 10 == 0:
-                self.text.append(f"进度: {processed}/{total} ({processed/total*100:.1f}%)")
+                self.text.append(
+                    f"进度: {processed}/{total} ({processed/total*100:.1f}%)"
+                )
 
         self.batch_operations.set_progress_callback(progress_callback)
         self.batch_operations.batch_negative_log(image_paths, self.output_path)
@@ -837,7 +999,9 @@ class ImageProcessInterface(QMainWindow):
             return
 
         if not (self.current_path.endswith((".tif", ".tiff", ".raw"))):
-            QMessageBox.warning(self, "警告", "只支持 .tif, .tiff 或 .raw 格式的图像文件！")
+            QMessageBox.warning(
+                self, "警告", "只支持 .tif, .tiff 或 .raw 格式的图像文件！"
+            )
             return
 
         dialog = ImageInfoDialog(self.current_path, self)
@@ -874,11 +1038,12 @@ class ImageProcessInterface(QMainWindow):
             return
 
         first_image_path = image_paths[0]
-        if first_image_path.endswith('.raw'):
+        if first_image_path.endswith(".raw"):
             raw_data = np.fromfile(first_image_path, dtype=np.uint16)
             sample_image = raw_data.reshape((2882, 2340))
         else:
             from PIL import Image as PILImage
+
             img = PILImage.open(first_image_path)
             sample_image = np.array(img)
 
@@ -893,25 +1058,26 @@ class ImageProcessInterface(QMainWindow):
 
             for image_path in tqdm.tqdm(image_paths, desc="Thresholding"):
                 try:
-                    if image_path.endswith('.raw'):
+                    if image_path.endswith(".raw"):
                         raw_data = np.fromfile(image_path, dtype=np.uint16)
                         img_data = raw_data.reshape((2882, 2340))
                     else:
                         from PIL import Image as PILImage
+
                         img = PILImage.open(image_path)
                         img_data = np.array(img)
 
                     if mode == "percent":
                         min_percent = param1
                         max_percent = param2
-                        
+
                         flat_pixels = img_data.flatten()
                         sorted_pixels = np.sort(flat_pixels)
                         total_pixels = len(flat_pixels)
-                        
+
                         low_count = int(total_pixels * min_percent / 100)
                         high_count = int(total_pixels * (100 - max_percent) / 100)
-                        
+
                         threshold_min = sorted_pixels[low_count]
                         threshold_max = sorted_pixels[total_pixels - high_count - 1]
                     else:
@@ -919,18 +1085,21 @@ class ImageProcessInterface(QMainWindow):
                         threshold_max = param2
 
                     result_img = img_data.copy().astype(np.float32)
-                    
-                    mask_valid = (img_data >= threshold_min) & (img_data <= threshold_max)
+
+                    mask_valid = (img_data >= threshold_min) & (
+                        img_data <= threshold_max
+                    )
                     mask_invalid = ~mask_valid
-                    
+
                     if np.any(mask_invalid):
                         filtered = median_filter(img_data, size=radius * 2 + 1)
                         result_img[mask_invalid] = filtered[mask_invalid]
 
                     basename = os.path.basename(image_path)
                     output_file = os.path.join(self.output_path, basename)
-                    
+
                     from PIL import Image as PILImage
+
                     output_img = PILImage.fromarray(result_img.astype(np.float32))
                     output_img.save(output_file)
 
@@ -952,7 +1121,9 @@ class ImageProcessInterface(QMainWindow):
 
         image_paths = self._collect_image_paths()
         if not image_paths:
-            QMessageBox.warning(self, "警告", "输入文件夹中没有找到 .tif/.tiff/.raw 图像！")
+            QMessageBox.warning(
+                self, "警告", "输入文件夹中没有找到 .tif/.tiff/.raw 图像！"
+            )
             return
 
         try:
@@ -1000,7 +1171,9 @@ class ImageProcessInterface(QMainWindow):
 
         image_paths = self._collect_image_paths()
         if not image_paths:
-            QMessageBox.warning(self, "警告", "输入文件夹中没有找到 .tif/.tiff/.raw 图像！")
+            QMessageBox.warning(
+                self, "警告", "输入文件夹中没有找到 .tif/.tiff/.raw 图像！"
+            )
             return
 
         dialog = SmallRegionDialog(self)
@@ -1014,14 +1187,16 @@ class ImageProcessInterface(QMainWindow):
             try:
                 img_data = self._load_image_data(image_path)
                 binary_img = np.where(img_data > 0, 255, 0).astype(np.uint8)
-                cleaned_img, removed_count = self._remove_small_regions(binary_img, min_pixels)
+                cleaned_img, removed_count = self._remove_small_regions(
+                    binary_img, min_pixels
+                )
 
                 output_path = self._build_output_path(image_path)
                 Image.fromarray(cleaned_img).save(output_path)
 
                 self.text.append(
                     f'<span style="color: green;">小区域删除成功: {os.path.basename(image_path)} '
-                    f'(移除连通域 {removed_count} 个)</span>'
+                    f"(移除连通域 {removed_count} 个)</span>"
                 )
             except Exception as e:
                 self.text.append(
@@ -1040,7 +1215,9 @@ class ImageProcessInterface(QMainWindow):
 
         image_paths = self._collect_image_paths()
         if not image_paths:
-            QMessageBox.warning(self, "警告", "输入文件夹中没有找到 .tif/.tiff/.raw 图像！")
+            QMessageBox.warning(
+                self, "警告", "输入文件夹中没有找到 .tif/.tiff/.raw 图像！"
+            )
             return
 
         os.makedirs(self.output_path, exist_ok=True)
@@ -1088,7 +1265,7 @@ class ImageProcessInterface(QMainWindow):
                 valid_count = sum(1 for _, y in transition_points if y is not None)
                 self.text.append(
                     f'<span style="color: green;">突变点提取成功: {os.path.basename(image_path)} '
-                    f'(总行数: {len(transition_points)}, 有效行: {valid_count})</span>'
+                    f"(总行数: {len(transition_points)}, 有效行: {valid_count})</span>"
                 )
                 self.text.append(f"  结果文件: {txt_save_path}")
                 self.text.append(f"  结果文件: {csv_save_path}")

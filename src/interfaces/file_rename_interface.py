@@ -20,6 +20,7 @@ from PyQt5.QtWidgets import (
     QButtonGroup,
 )
 from qfluentwidgets import FluentIcon
+from src.interfaces.ui_theme import apply_interface_theme, set_button_role
 
 
 @dataclass
@@ -49,6 +50,7 @@ class FileRenameInterface(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("fileRenameInterface")
+        apply_interface_theme(self)
         self.files: list[FileInfo] = []
         self.init_ui()
 
@@ -148,12 +150,12 @@ class FileRenameInterface(QWidget):
 
         preview_btn = QPushButton("预览重命名")
         preview_btn.clicked.connect(self.preview_rename)
-        preview_btn.setStyleSheet("background-color: #0078d4; color: white; padding: 10px;")
+        set_button_role(preview_btn, "primary")
         action_layout.addWidget(preview_btn)
 
         apply_btn = QPushButton("应用重命名")
         apply_btn.clicked.connect(self.apply_rename)
-        apply_btn.setStyleSheet("background-color: #28a745; color: white; padding: 10px;")
+        set_button_role(apply_btn, "success")
         action_layout.addWidget(apply_btn)
 
         layout.addLayout(action_layout)
