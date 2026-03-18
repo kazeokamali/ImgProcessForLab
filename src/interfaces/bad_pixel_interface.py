@@ -10,6 +10,7 @@ from PyQt5.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -18,6 +19,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QTextEdit,
     QVBoxLayout,
@@ -26,8 +28,13 @@ from PyQt5.QtWidgets import (
 
 from src.lifton2019.bad_pixel_mask import build_bad_pixel_mask
 from src.lifton2019.bad_pixel_repair import repair_bad_pixels
-from src.lifton2019.io_loader import collect_image_files, load_calibration_set, load_image
+from src.lifton2019.io_loader import (
+    collect_image_files,
+    load_bad_pixel_calibration_set,
+    load_image,
+)
 from src.lifton2019.models import BadPixelConfig, ProcessingConfig
+from src.interfaces.ui_theme import apply_interface_theme, set_button_role
 
 
 class BadPixelInterface(QMainWindow):
@@ -36,6 +43,7 @@ class BadPixelInterface(QMainWindow):
         self.setObjectName("badPixelInterface")
         self.setWindowTitle("坏点掩膜与修复")
         self.resize(1600, 900)
+        apply_interface_theme(self)
 
         self.current_mask: Optional[np.ndarray] = None
         self.current_mask_path: str = ""
@@ -44,52 +52,63 @@ class BadPixelInterface(QMainWindow):
 
     def _init_ui(self):
         central_widget = QWidget()
-        root_layout = QHBoxLayout(central_widget)
-
-        left_layout = QVBoxLayout()
-        right_layout = QVBoxLayout()
+        root_layout = QVBoxLayout(central_widget)
 
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
+        self.log_text.setMinimumHeight(220)
 
-        left_layout.addWidget(self._build_folder_group())
-        left_layout.addWidget(self._build_calib_group())
-        left_layout.addWidget(self._build_detection_group())
-        left_layout.addWidget(self._build_repair_group())
-        left_layout.addWidget(self._build_action_group())
+        log_group = QGroupBox("处理日志")
+        log_layout = QVBoxLayout()
+        log_layout.addWidget(self.log_text)
+        log_group.setLayout(log_layout)
+        root_layout.addWidget(log_group, 2)
+
+        controls_widget = QWidget()
+        controls_layout = QGridLayout(controls_widget)
+        controls_layout.setHorizontalSpacing(12)
+        controls_layout.setVerticalSpacing(12)
+
+        folder_group = self._build_folder_group()
+        calib_group = self._build_calib_group()
+        detection_group = self._build_detection_group()
+        repair_group = self._build_repair_group()
+        action_group = self._build_action_group()
 
         note_label = QLabel(
             "独立坏点处理流程：\n"
-            "1) 基于 dark/flat 数据生成统一坏点掩膜\n"
+            "1) 基于单组 dark/flat 数据生成统一坏点掩膜\n"
             "2) 使用该掩膜修复投影图像"
         )
         note_label.setWordWrap(True)
         note_label.setStyleSheet("color: #555;")
-        left_layout.addWidget(note_label)
-        left_layout.addStretch(1)
 
-        right_layout.addWidget(QLabel("处理日志"))
-        right_layout.addWidget(self.log_text)
+        controls_layout.addWidget(folder_group, 0, 0, 1, 2)
+        controls_layout.addWidget(calib_group, 1, 0)
+        controls_layout.addWidget(detection_group, 1, 1)
+        controls_layout.addWidget(repair_group, 2, 0)
+        controls_layout.addWidget(action_group, 2, 1)
+        controls_layout.addWidget(note_label, 3, 0, 1, 2)
+        controls_layout.setColumnStretch(0, 1)
+        controls_layout.setColumnStretch(1, 1)
+        controls_layout.setRowStretch(4, 1)
 
-        root_layout.addLayout(left_layout, 2)
-        root_layout.addLayout(right_layout, 3)
+        controls_scroll = QScrollArea()
+        controls_scroll.setWidgetResizable(True)
+        controls_scroll.setWidget(controls_widget)
+        root_layout.addWidget(controls_scroll, 3)
+
         self.setCentralWidget(central_widget)
 
     def _build_folder_group(self) -> QGroupBox:
         group = QGroupBox("目录设置")
         layout = QVBoxLayout()
 
-        self.dark_before_edit = self._build_folder_row(
-            layout, "扫描前 Dark 目录", self.on_select_dark_before_folder
+        self.dark_edit = self._build_folder_row(
+            layout, "Dark 目录", self.on_select_dark_folder
         )
-        self.flat_before_edit = self._build_folder_row(
-            layout, "扫描前 Flat 目录", self.on_select_flat_before_folder
-        )
-        self.dark_after_edit = self._build_folder_row(
-            layout, "扫描后 Dark 目录", self.on_select_dark_after_folder
-        )
-        self.flat_after_edit = self._build_folder_row(
-            layout, "扫描后 Flat 目录", self.on_select_flat_after_folder
+        self.flat_edit = self._build_folder_row(
+            layout, "Flat 目录", self.on_select_flat_folder
         )
         self.projection_edit = self._build_folder_row(
             layout, "投影目录", self.on_select_projection_folder
@@ -112,11 +131,6 @@ class BadPixelInterface(QMainWindow):
         group = QGroupBox("标定参数")
         layout = QFormLayout()
 
-        self.num_points_spin = QSpinBox()
-        self.num_points_spin.setRange(2, 64)
-        self.num_points_spin.setValue(7)
-        layout.addRow("Flat 点数 (N):", self.num_points_spin)
-
         self.raw_width_spin = QSpinBox()
         self.raw_width_spin.setRange(1, 100000)
         self.raw_width_spin.setValue(2340)
@@ -126,9 +140,6 @@ class BadPixelInterface(QMainWindow):
         self.raw_height_spin.setRange(1, 100000)
         self.raw_height_spin.setValue(2882)
         layout.addRow("RAW 高度:", self.raw_height_spin)
-
-        self.point_pattern_edit = QLineEdit(r"(\d+)")
-        layout.addRow("点位正则:", self.point_pattern_edit)
 
         group.setLayout(layout)
         return group
@@ -214,19 +225,23 @@ class BadPixelInterface(QMainWindow):
         group = QGroupBox("执行操作")
         layout = QVBoxLayout()
 
-        self.validate_btn = QPushButton("校验标定目录")
+        self.validate_btn = QPushButton("校验 dark/flat 目录")
+        set_button_role(self.validate_btn, "primary")
         self.validate_btn.clicked.connect(self.on_validate_clicked)
         layout.addWidget(self.validate_btn)
 
         self.build_mask_btn = QPushButton("生成坏点掩膜")
+        set_button_role(self.build_mask_btn, "primary")
         self.build_mask_btn.clicked.connect(self.on_build_mask_clicked)
         layout.addWidget(self.build_mask_btn)
 
         self.repair_btn = QPushButton("修复投影目录")
+        set_button_role(self.repair_btn, "primary")
         self.repair_btn.clicked.connect(self.on_repair_clicked)
         layout.addWidget(self.repair_btn)
 
         clear_btn = QPushButton("清空日志")
+        set_button_role(clear_btn, "danger")
         clear_btn.clicked.connect(self.log_text.clear)
         layout.addWidget(clear_btn)
 
@@ -276,17 +291,11 @@ class BadPixelInterface(QMainWindow):
             target_edit.setText(path)
             self._log(f"{title}: {path}")
 
-    def on_select_dark_before_folder(self):
-        self._select_folder("选择扫描前 Dark 目录", self.dark_before_edit)
+    def on_select_dark_folder(self):
+        self._select_folder("选择 Dark 目录", self.dark_edit)
 
-    def on_select_flat_before_folder(self):
-        self._select_folder("选择扫描前 Flat 目录", self.flat_before_edit)
-
-    def on_select_dark_after_folder(self):
-        self._select_folder("选择扫描后 Dark 目录", self.dark_after_edit)
-
-    def on_select_flat_after_folder(self):
-        self._select_folder("选择扫描后 Flat 目录", self.flat_after_edit)
+    def on_select_flat_folder(self):
+        self._select_folder("选择 Flat 目录", self.flat_edit)
 
     def on_select_projection_folder(self):
         self._select_folder("选择投影目录", self.projection_edit)
@@ -320,57 +329,48 @@ class BadPixelInterface(QMainWindow):
             directional_line_aspect_ratio=float(self.directional_ratio_spin.value()),
         )
         return ProcessingConfig(
-            num_points=int(self.num_points_spin.value()),
+            num_points=1,
             raw_width=int(self.raw_width_spin.value()),
             raw_height=int(self.raw_height_spin.value()),
-            point_pattern=self.point_pattern_edit.text().strip() or r"(\d+)",
+            point_pattern=r".*",
             bad_pixel=bad_cfg,
         )
 
-    def _required_calib_paths(self) -> Optional[Tuple[str, str, str, str, str]]:
-        paths = (
-            self.dark_before_edit.text().strip(),
-            self.flat_before_edit.text().strip(),
-            self.dark_after_edit.text().strip(),
-            self.flat_after_edit.text().strip(),
-            self.output_edit.text().strip(),
-        )
-        if not all(paths):
-            QMessageBox.warning(
-                self, "警告", "请先选择扫描前后 dark/flat 目录以及输出目录。"
-            )
+    def _required_calib_paths(self, require_output: bool = True) -> Optional[Tuple[str, str, str]]:
+        dark_folder = self.dark_edit.text().strip()
+        flat_folder = self.flat_edit.text().strip()
+        output_folder = self.output_edit.text().strip()
+
+        if not dark_folder or not flat_folder:
+            QMessageBox.warning(self, "警告", "请先选择 dark/flat 目录。")
             return None
-        return paths
+
+        if require_output and not output_folder:
+            QMessageBox.warning(self, "警告", "请先选择输出目录。")
+            return None
+
+        return dark_folder, flat_folder, output_folder
 
     def on_validate_clicked(self):
-        maybe = self._required_calib_paths()
+        maybe = self._required_calib_paths(require_output=False)
         if maybe is None:
             return
 
-        dark_before, flat_before, dark_after, flat_after, _ = maybe
+        dark_folder, flat_folder, _ = maybe
         cfg = self._build_processing_config()
         compute_std_maps = cfg.bad_pixel.enable_stability_check
 
         try:
-            before = load_calibration_set(
-                dark_folder=dark_before,
-                flat_folder=flat_before,
-                config=cfg,
+            calib = load_bad_pixel_calibration_set(
+                dark_folder=dark_folder,
+                flat_folder=flat_folder,
+                raw_shape=(cfg.raw_height, cfg.raw_width),
                 compute_std_maps=compute_std_maps,
             )
-            after = load_calibration_set(
-                dark_folder=dark_after,
-                flat_folder=flat_after,
-                config=cfg,
-                compute_std_maps=compute_std_maps,
-            )
-            if before.point_ids != after.point_ids:
-                raise ValueError(
-                    f"点位 ID 不一致：before={before.point_ids}, after={after.point_ids}"
-                )
             self._log("校验通过。")
             self._log(
-                f"点位 ID: {', '.join(before.point_ids)} | 图像尺寸: {before.dark_avg.shape}"
+                f"图像尺寸: {calib.dark_avg.shape} | dark帧数: {calib.frame_counts.get('dark', 0)} | "
+                f"flat帧数: {calib.frame_counts.get('flat', 0)}"
             )
         except Exception as e:
             QMessageBox.critical(self, "校验失败", str(e))
@@ -381,25 +381,19 @@ class BadPixelInterface(QMainWindow):
         if maybe is None:
             return
 
-        dark_before, flat_before, dark_after, flat_after, output_folder = maybe
+        dark_folder, flat_folder, output_folder = maybe
         cfg = self._build_processing_config()
         compute_std_maps = cfg.bad_pixel.enable_stability_check
 
         try:
-            before = load_calibration_set(
-                dark_folder=dark_before,
-                flat_folder=flat_before,
-                config=cfg,
-                compute_std_maps=compute_std_maps,
-            )
-            after = load_calibration_set(
-                dark_folder=dark_after,
-                flat_folder=flat_after,
-                config=cfg,
+            calib = load_bad_pixel_calibration_set(
+                dark_folder=dark_folder,
+                flat_folder=flat_folder,
+                raw_shape=(cfg.raw_height, cfg.raw_width),
                 compute_std_maps=compute_std_maps,
             )
 
-            mask, stats = build_bad_pixel_mask(before, after, cfg.bad_pixel)
+            mask, stats = build_bad_pixel_mask(calib, cfg.bad_pixel)
             self.current_mask = mask
 
             os.makedirs(output_folder, exist_ok=True)

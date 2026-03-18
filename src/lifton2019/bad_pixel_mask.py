@@ -1,5 +1,5 @@
 import os
-from typing import Dict, Optional, Tuple
+from typing import Dict, Tuple
 
 import imageio.v3 as iio
 import numpy as np
@@ -87,15 +87,10 @@ def _load_known_mask(path: str, shape: Tuple[int, int]) -> np.ndarray:
 
 
 def build_bad_pixel_mask(
-    calib_before: CalibrationSet,
-    calib_after: CalibrationSet,
+    calibration: CalibrationSet,
     config: BadPixelConfig,
 ) -> Tuple[np.ndarray, Dict[str, int]]:
-    shape = calib_before.dark_avg.shape
-    if calib_after.dark_avg.shape != shape:
-        raise ValueError(
-            f"Dark shape mismatch between before/after: {shape} vs {calib_after.dark_avg.shape}"
-        )
+    shape = calibration.dark_avg.shape
 
     if not config.enabled:
         empty = np.zeros(shape, dtype=bool)
@@ -105,11 +100,8 @@ def build_bad_pixel_mask(
     stats: Dict[str, int] = {}
 
     if config.enable_flat_neighbor_check:
-        flat_before = np.stack(calib_before.flat_avgs, axis=0) - calib_before.dark_avg
-        flat_after = np.stack(calib_after.flat_avgs, axis=0) - calib_after.dark_avg
-        flat_mean = np.mean(
-            np.concatenate((flat_before, flat_after), axis=0), axis=0
-        ).astype(np.float32, copy=False)
+        flat_stack = np.stack(calibration.flat_avgs, axis=0) - calibration.dark_avg
+        flat_mean = np.mean(flat_stack, axis=0).astype(np.float32, copy=False)
         mask_flat = _neighbor_deviation_mask(
             flat_mean,
             neighborhood_size=config.neighborhood_size,
@@ -119,9 +111,7 @@ def build_bad_pixel_mask(
         stats["flat_neighbor"] = int(mask_flat.sum())
 
     if config.enable_dark_neighbor_check:
-        dark_mean = ((calib_before.dark_avg + calib_after.dark_avg) * 0.5).astype(
-            np.float32, copy=False
-        )
+        dark_mean = calibration.dark_avg.astype(np.float32, copy=False)
         mask_dark = _neighbor_deviation_mask(
             dark_mean,
             neighborhood_size=config.neighborhood_size,
@@ -132,14 +122,10 @@ def build_bad_pixel_mask(
 
     if config.enable_stability_check:
         stability_maps = []
-        if calib_before.dark_std is not None:
-            stability_maps.append(calib_before.dark_std)
-        if calib_after.dark_std is not None:
-            stability_maps.append(calib_after.dark_std)
-        if calib_before.flat_stds:
-            stability_maps.extend(calib_before.flat_stds)
-        if calib_after.flat_stds:
-            stability_maps.extend(calib_after.flat_stds)
+        if calibration.dark_std is not None:
+            stability_maps.append(calibration.dark_std)
+        if calibration.flat_stds:
+            stability_maps.extend(calibration.flat_stds)
 
         if stability_maps:
             stability = np.mean(np.stack(stability_maps, axis=0), axis=0)
@@ -174,4 +160,3 @@ def build_bad_pixel_mask(
 
     stats["total"] = int(merged.sum())
     return merged.astype(bool), stats
-

@@ -31,6 +31,7 @@ from src.utils.ring_artifact_processing import (
     remove_ring_artifact_morphology,
     remove_ring_artifact_polar,
 )
+from src.interfaces.ui_theme import apply_interface_theme, set_button_role
 
 RECOMMENDED_PRESET_V1 = {
     "raw_width": 2340,
@@ -56,8 +57,9 @@ class RingArtifactInterface(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent=parent)
         self.setObjectName("ringArtifactInterface")
-        self.setWindowTitle("Ring Artifact Post Process")
+        self.setWindowTitle("环形伪影后处理")
         self.resize(1500, 900)
+        apply_interface_theme(self)
 
         self.input_folder: Optional[str] = None
         self.output_folder: Optional[str] = None
@@ -164,7 +166,7 @@ class RingArtifactInterface(QMainWindow):
         self.center_mode_combo.currentIndexChanged.connect(self._on_center_mode_changed)
         layout.addWidget(self.center_mode_combo)
 
-        layout.addWidget(QLabel("Center X:"))
+        layout.addWidget(QLabel("中心 X:"))
         self.center_x_spin = QDoubleSpinBox()
         self.center_x_spin.setRange(0.0, 100000.0)
         self.center_x_spin.setDecimals(2)
@@ -172,7 +174,7 @@ class RingArtifactInterface(QMainWindow):
         self.center_x_spin.setEnabled(False)
         layout.addWidget(self.center_x_spin)
 
-        layout.addWidget(QLabel("Center Y:"))
+        layout.addWidget(QLabel("中心 Y:"))
         self.center_y_spin = QDoubleSpinBox()
         self.center_y_spin.setRange(0.0, 100000.0)
         self.center_y_spin.setDecimals(2)
@@ -341,10 +343,12 @@ class RingArtifactInterface(QMainWindow):
         layout = QHBoxLayout()
 
         run_btn = QPushButton("开始批量去环")
+        set_button_role(run_btn, "primary")
         run_btn.clicked.connect(self.on_run_batch)
         layout.addWidget(run_btn)
 
         clear_btn = QPushButton("清空日志")
+        set_button_role(clear_btn, "danger")
         clear_btn.clicked.connect(self.log_text.clear)
         layout.addWidget(clear_btn)
 

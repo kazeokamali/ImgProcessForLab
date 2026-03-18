@@ -23,6 +23,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from src.interfaces.ui_theme import apply_interface_theme, set_button_role
 
 
 class SpeedPlotDialog(QDialog):
@@ -71,6 +72,7 @@ class WaveSpeedInterface(QMainWindow):
         self.setObjectName("waveSpeedInterface")
         self.setWindowTitle("波阵面传播速度分析")
         self.resize(1400, 900)
+        apply_interface_theme(self)
 
         self.input_folder: Optional[str] = None
         self.output_folder: Optional[str] = None
@@ -149,14 +151,17 @@ class WaveSpeedInterface(QMainWindow):
         action_layout = QVBoxLayout()
 
         per_row_button = QPushButton("1. 计算按行传播速度")
+        set_button_role(per_row_button, "primary")
         per_row_button.clicked.connect(self.on_compute_per_row_speed)
         action_layout.addWidget(per_row_button)
 
         leftmost_button = QPushButton("2. 计算最左传播点速度")
+        set_button_role(leftmost_button, "primary")
         leftmost_button.clicked.connect(self.on_compute_leftmost_speed)
         action_layout.addWidget(leftmost_button)
 
         average_button = QPushButton("3. 计算区间平均传播速度")
+        set_button_role(average_button, "primary")
         average_button.clicked.connect(self.on_compute_average_speed)
         action_layout.addWidget(average_button)
 
@@ -165,6 +170,7 @@ class WaveSpeedInterface(QMainWindow):
         action_layout.addWidget(plot_button)
 
         clear_button = QPushButton("清空日志")
+        set_button_role(clear_button, "danger")
         clear_button.clicked.connect(lambda: self.log_text.clear())
         action_layout.addWidget(clear_button)
 
