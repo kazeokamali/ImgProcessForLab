@@ -1,141 +1,170 @@
-# 图像处理软件 - 用户安装说明
+# 用户安装与环境配置指南（双入口）
 
-## 系统要求
+更新时间：2026-03-18
 
-### 基本要求（所有电脑）
-- 操作系统：Windows 10/11 64位
-- 内存：至少8GB RAM
-- 磁盘空间：至少2GB可用空间
+## 1. 项目有两个入口
 
-### GPU加速要求（可选）
-- NVIDIA显卡（支持CUDA）
-- 显存：建议8GB以上
-- CUDA驱动：12.x版本
+本项目不是单一程序，而是两个入口：
 
-## 安装方式
+- `main.py`：综合处理主程序  
+  功能包括图像处理、黑线去除、环伪影后处理、多点平场、坏点掩膜、超视野CT模拟、波速分析、文件重命名。
+- `main_recon.py`：独立重构程序  
+  功能为 CBCT 重构（FDK/SIRT/CGLS 等）。
 
-### 方式一：直接运行exe文件（文件过大已删除）
+建议把这两个入口都交付给用户，并在文档中明确用途。
 
-1. **下载软件**
-   - 获取 `IMG_Process_SW.exe` 文件
+## 2. 系统与硬件要求
 
-2. **首次运行**
-   - 双击 `IMG_Process_SW.exe` 启动程序
-   - 如果Windows提示"无法运行"，点击"更多信息" → "仍要运行"
-   - 如果杀毒软件报警，请添加信任
+基础要求（必须）：
 
-3. **检查运行模式**
-   - 程序启动后，主页会显示当前运行模式：
-     - ✅ **GPU加速已启用**：检测到NVIDIA显卡，将使用GPU加速
-     - ⚠️ **CPU模式运行**：未检测到GPU，将使用CPU处理
+- Windows 10/11 64位
+- Python 3.10
+- 内存 16GB 及以上（建议）
+- 可用磁盘空间 10GB 及以上（数据量大时建议更多）
 
-### 方式二：从源码运行
+GPU加速要求（可选）：
 
-1. **安装Python**
-   - 下载并安装 Python 3.10 或更高版本
-   - 安装时勾选 "Add Python to PATH"
+- NVIDIA 显卡
+- 已安装可用驱动（`nvidia-smi` 可正常返回）
+- 若使用 CuPy：CUDA 12.x 对应版本（`cupy-cuda12x`）
+- 若使用 ASTRA CUDA：建议用 Conda 安装 `astra-toolbox`
 
-2. **下载源码**
-   ```bash
-   git clone https://github.com/kazeokamali/ImgProcessForLab.git
-   ```
+## 3. 推荐环境方案
 
-3. **创建虚拟环境**
-   ```bash
-   python -m venv venv310
-   .\venv310\Scripts\activate
-   ```
+推荐采用“双环境”：
 
-4. **安装依赖**
-   ```bash
-   pip install -r requirements.txt
-   ```
+- `venv310`：运行主程序 `main.py`（以及重构界面 UI）
+- `astra_env`（Conda）：用于重构计算后端（ASTRA）
 
-5. **运行程序**
-   ```bash
-   python main.py
-   ```
+这样做的好处是：UI依赖和 ASTRA/CUDA 依赖分离，升级与排错更稳定。
 
-## GPU加速配置（可选）
+## 4. 安装步骤（主程序环境：venv310）
 
-### 如果您有NVIDIA显卡
+在项目根目录执行：
 
-1. **检查显卡驱动**
-   - 右键"此电脑" → "管理" → "设备管理器" → "显示适配器"
-   - 确认有NVIDIA显卡
+```powershell
+python -m venv venv310
+.\venv310\Scripts\activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
 
-2. **安装CUDA驱动**
-   - 访问 [NVIDIA CUDA下载页面](https://developer.nvidia.com/cuda-downloads)
-   - 下载并安装 CUDA Toolkit 12.x
-   - 安装完成后重启电脑
+说明：
 
-3. **验证CUDA安装**
-   - 打开命令提示符，输入：
-     ```bash
-     nvidia-smi
-     ```
-   - 如果显示显卡信息，说明CUDA已正确安装
+- 该环境用于运行 `main.py`
+- 也可以运行 `main_recon.py` 的界面部分
 
-4. **安装CuPy（GPU加速库）**
-   ```bash
-   pip install cupy-cuda12x
-   ```
+## 5. 安装步骤（重构后端环境：astra_env，可选但推荐）
 
-5. **重启程序**
-   - 重新运行程序，主页应显示"GPU加速已启用"
+### 5.1 创建环境
 
-## 性能对比
+```powershell
+conda create -n astra_env python=3.10 -y
+conda activate astra_env
+```
 
-| 处理模式 | 100张图像处理时间 | 适用场景 |
-|---------|----------------|---------|
-| GPU加速 | 约30秒 | 大批量图像处理 |
-| CPU模式 | 约3-5分钟 | 小批量或单张图像 |
+### 5.2 安装 ASTRA
 
-## 常见问题
+```powershell
+conda install -c astra-toolbox astra-toolbox -y
+```
 
-### 1. 程序无法启动
-**解决方案：**
-- 确认操作系统为Windows 10/11 64位
-- 右键程序 → "属性" → "兼容性" → 勾选"以兼容模式运行"
-- 关闭杀毒软件后重试
+### 5.3 安装重构运行所需基础包
 
-### 2. 提示缺少DLL文件
-**解决方案：**
-- 安装 [Visual C++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe)
-- 重启电脑后重试
+```powershell
+pip install numpy scipy tifffile imageio pyqt5
+```
 
-### 3. GPU加速未启用
-**解决方案：**
-- 确认已安装NVIDIA显卡驱动
-- 确认已安装CUDA Toolkit 12.x
-- 确认已安装cupy-cuda12x（仅源码运行需要）
-- 重启程序
+如你的 `astra_env` 已包含这些包，可跳过。
 
-### 4. 处理速度慢
-**解决方案：**
-- 如果使用CPU模式，这是正常现象
-- 建议安装NVIDIA显卡并启用GPU加速
-- 减少批处理图像数量
+## 6. 运行方式（两个入口）
 
-### 5. 内存不足错误
-**解决方案：**
-- 关闭其他程序释放内存
-- 减少批处理图像数量
-- 使用GPU加速（显存通常比内存大）
+### 6.1 运行综合处理主程序
 
-## 技术支持
+```powershell
+.\venv310\Scripts\activate
+python main.py
+```
 
-如遇到其他问题，请提供以下信息：
-- 操作系统版本
-- 显卡型号（如有）
-- CUDA版本（如有）
-- 错误截图或错误信息
+### 6.2 运行独立重构程序
 
-## 更新日志
+方式A（推荐）：
 
-### v1.0.0
-- 支持CPU/GPU自适应运行
-- 图像处理核心功能
-- 黑线去除功能
-- 文件重命名功能
-- 图像信息查看和阈值划分功能
+- 用 `venv310` 启动 `main_recon.py` 的界面
+- 在重构页面里把“工作进程 Python”设置为 `astra_env` 的 `python.exe`
+
+```powershell
+.\venv310\Scripts\activate
+python main_recon.py
+```
+
+方式B（可选）：
+
+- 直接在 `astra_env` 中运行 `main_recon.py`（前提是该环境已安装 PyQt5）
+
+```powershell
+conda activate astra_env
+python main_recon.py
+```
+
+## 7. 安装后检查
+
+### 7.1 GPU驱动检查
+
+```powershell
+nvidia-smi
+```
+
+### 7.2 主程序检查
+
+- 启动 `main.py`
+- 首页会显示当前状态（GPU加速已启用 / CPU模式运行）
+
+### 7.3 重构检查
+
+- 启动 `main_recon.py`
+- 执行一组小数据重构，检查日志中的后端信息（如 `astra_fdk_cuda`）
+
+## 8. 常见问题
+
+### 8.1 `No module named cupy`
+
+说明：主程序 GPU 功能依赖 CuPy。  
+处理：
+
+```powershell
+.\venv310\Scripts\activate
+pip install cupy-cuda12x
+```
+
+若不装 CuPy，程序会回退 CPU，功能仍可用。
+
+### 8.2 重构时报 ASTRA 不可用
+
+说明：ASTRA 未安装到当前解释器。  
+处理：
+
+- 把重构页面中的“工作进程 Python”切到 `astra_env\python.exe`
+- 或在当前环境安装 `astra-toolbox`
+
+### 8.3 RAW 尺寸不匹配
+
+说明：RAW 文件宽高设置与真实尺寸不一致。  
+处理：在对应页面调整 `RAW 宽度/高度` 参数。
+
+### 8.4 启动即闪退或缺 DLL
+
+处理：
+
+- 安装 Visual C++ Redistributable (x64)
+- 确认 Python、依赖、驱动版本匹配
+- 用终端运行查看报错而不是直接双击
+
+## 9. 给其他用户的建议
+
+
+建议双环境：
+
+- `venv310` 创建与安装脚本
+- `astra_env` 创建与安装脚本
+
