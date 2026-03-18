@@ -1,4 +1,4 @@
-import csv
+﻿import csv
 import json
 import os
 import time
@@ -29,19 +29,60 @@ class ReconstructionRunResult:
     backend_note: str
 
 
+@dataclass
+class ReconstructionPreviewResult:
+    preview_path: str
+    preview_dir: str
+    z_index: int
+    elapsed_seconds: float
+    backend_used: str
+    backend_note: str
+
+
 def _emit_progress(progress_callback: ProgressCallback, done: int, total: int, message: str):
     if progress_callback is not None:
         progress_callback(int(done), int(total), message)
 
 
+def _estimate_astra_required_bytes(
+    det_h: int,
+    det_w: int,
+    n_proj: int,
+    nx: int,
+    ny: int,
+    nz: int,
+) -> int:
+    # ASTRA 3D path at least needs full projection stack + reconstruction volume.
+    projection_bytes = int(det_h) * int(det_w) * int(n_proj) * 4
+    volume_bytes = int(nx) * int(ny) * int(nz) * 4
+    # Conservative overhead factor for temporary buffers/intermediates.
+    # Can be tuned by env RECON_ASTRA_EST_FACTOR (default 2.2).
+    try:
+        factor = float(os.environ.get("RECON_ASTRA_EST_FACTOR", "2.2"))
+    except Exception:
+        factor = 2.2
+    factor = max(1.2, min(factor, 8.0))
+    return int((projection_bytes + volume_bytes) * factor)
+
+
+def _get_cuda_free_bytes() -> Optional[int]:
+    try:
+        import cupy as _cp  # type: ignore
+
+        free_bytes, _ = _cp.cuda.runtime.memGetInfo()
+        return int(free_bytes)
+    except Exception:
+        return None
+
+
 def _load_projection(path: str) -> np.ndarray:
     if path.lower().endswith(".raw"):
-        raise ValueError("阶段3暂不支持 RAW 直接重构，请先转换为 tif/tiff。")
+        raise ValueError("Stage-3 does not support RAW direct reconstruction; convert to tif/tiff first.")
     img = iio.imread(path)
     if img.ndim == 3:
         img = img[:, :, 0]
     if img.ndim != 2:
-        raise ValueError(f"投影图像维度非法: {path}, ndim={img.ndim}")
+        raise ValueError(f"Invalid projection image dimensions: {path}, ndim={img.ndim}")
     return np.asarray(img, dtype=np.float32)
 
 
@@ -185,7 +226,7 @@ def _build_astra_proj_geom(
 ):
     origin_det = float(config.sdd_mm) - float(config.sod_mm)
     if origin_det <= 0:
-        raise ValueError("ASTRA 几何参数非法: 需要 SDD > SOD。")
+        raise ValueError("Invalid ASTRA geometry: require SDD > SOD.")
 
     proj_geom = astra_module.create_proj_geom(
         "cone",
@@ -246,19 +287,19 @@ def _load_projections_stack(
 ) -> np.ndarray:
     n_proj = len(projection_files)
     projections = np.empty((det_h, n_proj, det_w), dtype=np.float32)
-    _emit_progress(progress_callback, 2, 100, "ASTRA: 正在加载投影到内存...")
+    _emit_progress(progress_callback, 2, 100, "ASTRA: loading projection stack...")
     for i, path in enumerate(projection_files):
         if stop_requested and stop_requested():
-            raise RuntimeError("用户中止重构。")
+            raise RuntimeError("Reconstruction cancelled by user.")
         proj = _load_projection(path)
         if proj.shape != (det_h, det_w):
             raise ValueError(
-                f"投影尺寸不一致: {os.path.basename(path)} -> {proj.shape}, 期望 {(det_h, det_w)}"
+                f"Projection shape mismatch: {os.path.basename(path)} -> {proj.shape}, expected {(det_h, det_w)}"
             )
         projections[:, i, :] = proj
         if i == 0 or (i + 1) % 20 == 0 or (i + 1) == n_proj:
             p = 2 + int(round((i + 1) / max(1, n_proj) * 33.0))
-            _emit_progress(progress_callback, p, 100, f"ASTRA: 已加载投影 {i + 1}/{n_proj}")
+            _emit_progress(progress_callback, p, 100, f"ASTRA: loaded projection {i + 1}/{n_proj}")
     return projections
 
 
@@ -270,10 +311,10 @@ def _apply_post_refine_if_needed(
 ):
     if int(config.refine_iterations) <= 0:
         return
-    _emit_progress(progress_callback, 85, 100, "ASTRA/CPU: 正在进行后处理扩散...")
+    _emit_progress(progress_callback, 85, 100, "ASTRA/CPU: applying post-refine diffusion...")
     for zi in range(volume.shape[0]):
         if stop_requested and stop_requested():
-            raise RuntimeError("用户中止重构。")
+            raise RuntimeError("Reconstruction cancelled by user.")
         volume[zi] = _refine_slice_diffusion(
             volume[zi],
             iterations=int(config.refine_iterations),
@@ -287,15 +328,15 @@ def _write_volume_slices(
     progress_callback: ProgressCallback = None,
     stop_requested: Optional[Callable[[], bool]] = None,
 ):
-    _emit_progress(progress_callback, 92, 100, "正在写出切片...")
+    _emit_progress(progress_callback, 92, 100, "Writing output slices...")
     for zi in range(volume.shape[0]):
         if stop_requested and stop_requested():
-            raise RuntimeError("用户中止重构。")
+            raise RuntimeError("Reconstruction cancelled by user.")
         out_path = os.path.join(output_slice_dir, f"slice_{zi:05d}.tif")
         tiff.imwrite(out_path, volume[zi].astype(np.float32, copy=False), dtype=np.float32)
         if zi == 0 or (zi + 1) % 50 == 0 or (zi + 1) == volume.shape[0]:
             p = 92 + int(round((zi + 1) / max(1, volume.shape[0]) * 7.0))
-            _emit_progress(progress_callback, p, 100, f"已写出切片 {zi + 1}/{volume.shape[0]}")
+            _emit_progress(progress_callback, p, 100, f"Wrote slice {zi + 1}/{volume.shape[0]}")
 
 
 def _run_astra_reconstruction(
@@ -345,15 +386,18 @@ def _run_astra_reconstruction(
         voxel_z_mm=voxel_z,
     )
 
-    _emit_progress(progress_callback, 40, 100, "ASTRA: 正在创建 CUDA 重构任务...")
+    _emit_progress(progress_callback, 40, 100, "ASTRA: creating CUDA reconstruction job...")
     sino_id = None
     rec_id = None
     fdk_alg_id = None
     iter_alg_id = None
     volume = None
     try:
+        _emit_progress(progress_callback, 42, 100, "ASTRA: creating sinogram object...")
         sino_id = astra_module.data3d.create("-sino", proj_geom, projections)
+        _emit_progress(progress_callback, 46, 100, "ASTRA: creating volume object...")
         rec_id = astra_module.data3d.create("-vol", vol_geom)
+        _emit_progress(progress_callback, 49, 100, "ASTRA: CUDA objects ready.")
 
         option_base = _get_astra_option_base()
         if algo_key == "fdk":
@@ -364,7 +408,7 @@ def _run_astra_reconstruction(
             option["FilterType"] = _astra_filter_name(config.filter_name)
             cfg["option"] = option
             fdk_alg_id = astra_module.algorithm.create(cfg)
-            _emit_progress(progress_callback, 55, 100, "ASTRA: FDK_CUDA 重构中...")
+            _emit_progress(progress_callback, 55, 100, "ASTRA: running FDK_CUDA...")
             astra_module.algorithm.run(fdk_alg_id)
             backend = "astra_fdk_cuda"
 
@@ -378,7 +422,7 @@ def _run_astra_reconstruction(
                 progress_callback,
                 55,
                 100,
-                f"ASTRA: SIRT3D_CUDA 迭代中 ({iter_count} 次)...",
+                f"ASTRA: running SIRT3D_CUDA ({iter_count} iterations)...",
             )
             astra_module.algorithm.run(iter_alg_id, int(max(1, iter_count)))
             backend = "astra_sirt3d_cuda"
@@ -393,7 +437,7 @@ def _run_astra_reconstruction(
                 progress_callback,
                 55,
                 100,
-                f"ASTRA: CGLS3D_CUDA 迭代中 ({iter_count} 次)...",
+                f"ASTRA: running CGLS3D_CUDA ({iter_count} iterations)...",
             )
             astra_module.algorithm.run(iter_alg_id, int(max(1, iter_count)))
             backend = "astra_cgls3d_cuda"
@@ -406,7 +450,7 @@ def _run_astra_reconstruction(
             option_fdk["FilterType"] = _astra_filter_name(config.filter_name)
             cfg_fdk["option"] = option_fdk
             fdk_alg_id = astra_module.algorithm.create(cfg_fdk)
-            _emit_progress(progress_callback, 50, 100, "ASTRA: 先执行 FDK_CUDA 初始化...")
+            _emit_progress(progress_callback, 50, 100, "ASTRA: running initial FDK_CUDA...")
             astra_module.algorithm.run(fdk_alg_id)
 
             cfg_iter = astra_module.astra_dict("CGLS3D_CUDA")
@@ -418,15 +462,15 @@ def _run_astra_reconstruction(
                 progress_callback,
                 65,
                 100,
-                f"ASTRA: 再执行 CGLS3D_CUDA 迭代 ({iter_count} 次)...",
+                f"ASTRA: running CGLS3D_CUDA refine ({iter_count} iterations)...",
             )
             astra_module.algorithm.run(iter_alg_id, int(max(1, iter_count)))
             backend = "astra_fdk_cgls3d_cuda"
 
         else:
-            raise ValueError(f"不支持的重构算法: {config.algorithm}")
+            raise ValueError(f"Unsupported reconstruction algorithm: {config.algorithm}")
 
-        _emit_progress(progress_callback, 82, 100, "ASTRA: 读取重构体...")
+        _emit_progress(progress_callback, 82, 100, "ASTRA: fetching reconstructed volume...")
         volume = astra_module.data3d.get(rec_id).astype(np.float32, copy=False)
 
     finally:
@@ -440,7 +484,7 @@ def _run_astra_reconstruction(
             astra_module.data3d.delete(sino_id)
 
     if volume is None:
-        raise RuntimeError("ASTRA 重构未产生有效输出。")
+        raise RuntimeError("ASTRA reconstruction did not produce valid output.")
 
     _apply_post_refine_if_needed(
         volume=volume,
@@ -499,10 +543,10 @@ def _run_fdk_reconstruction_cpu(
     z_batch_size = max(1, min(nz, target_batch_bytes // max(1, bytes_per_slice)))
     batches = (nz + z_batch_size - 1) // z_batch_size
 
-    _emit_progress(progress_callback, 2, 100, "CPU: 使用 numpy FDK（较慢）...")
+    _emit_progress(progress_callback, 2, 100, "CPU: running numpy FDK (batched)...")
     for b in range(batches):
         if stop_requested and stop_requested():
-            raise RuntimeError("用户中止重构。")
+            raise RuntimeError("Reconstruction cancelled by user.")
 
         z_start = b * z_batch_size
         z_end = min(nz, z_start + z_batch_size)
@@ -511,12 +555,12 @@ def _run_fdk_reconstruction_cpu(
 
         for p_idx, (path, angle_deg) in enumerate(zip(projection_files, angles_deg.tolist())):
             if stop_requested and stop_requested():
-                raise RuntimeError("用户中止重构。")
+                raise RuntimeError("Reconstruction cancelled by user.")
 
             proj = _load_projection(path)
             if proj.shape != (det_h, det_w):
                 raise ValueError(
-                    f"投影尺寸不一致: {os.path.basename(path)} -> {proj.shape}, 期望 {(det_h, det_w)}"
+                    f"Projection shape mismatch: {os.path.basename(path)} -> {proj.shape}, expected {(det_h, det_w)}"
                 )
             proj_f = _filter_projection_fdk(
                 proj,
@@ -550,7 +594,7 @@ def _run_fdk_reconstruction_cpu(
                     progress_callback,
                     min(95, done),
                     100,
-                    f"CPU: batch {b + 1}/{batches}, 投影 {p_idx + 1}/{n_proj}",
+                    f"CPU: batch {b + 1}/{batches}, projection {p_idx + 1}/{n_proj}",
                 )
 
         vol_batch *= np.float32(np.pi / float(max(1, n_proj)))
@@ -575,6 +619,163 @@ def _run_fdk_reconstruction_cpu(
     }
 
 
+def _reconstruct_single_slice_fdk_cpu(
+    config: ReconstructionConfig,
+    projection_files: List[str],
+    angles_deg: np.ndarray,
+    det_h: int,
+    det_w: int,
+    voxel_x: float,
+    voxel_y: float,
+    voxel_z: float,
+    z_index: int,
+    progress_callback: ProgressCallback = None,
+    stop_requested: Optional[Callable[[], bool]] = None,
+) -> np.ndarray:
+    nx = int(config.recon_nx)
+    ny = int(config.recon_ny)
+    nz = int(config.recon_nz)
+    if z_index < 0 or z_index >= nz:
+        raise ValueError(f"Preview z_index out of range: {z_index}, valid [0, {max(0, nz - 1)}].")
+
+    du = float(config.detector_pixel_size_x_mm)
+    dv = float(config.detector_pixel_size_y_mm)
+    sod = float(config.sod_mm)
+    sdd = float(config.sdd_mm)
+    n_proj = len(projection_files)
+
+    x = (np.arange(nx, dtype=np.float32) - (nx - 1) * 0.5) * float(voxel_x)
+    y = (np.arange(ny, dtype=np.float32) - (ny - 1) * 0.5) * float(voxel_y)
+    z_vals = (np.arange(nz, dtype=np.float32) - (nz - 1) * 0.5) * float(voxel_z)
+    z_mm = float(z_vals[int(z_index)])
+    xg, yg = np.meshgrid(x, y, indexing="xy")
+
+    u0 = (det_w - 1) * 0.5 + float(config.cor_offset_px)
+    v0 = (det_h - 1) * 0.5
+
+    out = np.zeros((ny, nx), dtype=np.float32)
+    _emit_progress(
+        progress_callback,
+        2,
+        100,
+        f"Preview: reconstructing single slice z={int(z_index)} with CPU FDK...",
+    )
+    for p_idx, (path, angle_deg) in enumerate(zip(projection_files, angles_deg.tolist())):
+        if stop_requested and stop_requested():
+            raise RuntimeError("Reconstruction preview cancelled by user.")
+
+        proj = _load_projection(path)
+        if proj.shape != (det_h, det_w):
+            raise ValueError(
+                f"Projection shape mismatch: {os.path.basename(path)} -> {proj.shape}, expected {(det_h, det_w)}"
+            )
+        proj_f = _filter_projection_fdk(
+            proj,
+            sdd_mm=sdd,
+            pixel_x_mm=du,
+            pixel_y_mm=dv,
+            filter_name=config.filter_name,
+        )
+
+        beta = np.deg2rad(float(angle_deg))
+        cb = float(np.cos(beta))
+        sb = float(np.sin(beta))
+
+        x_beta = xg * cb + yg * sb
+        denom = sod - x_beta
+        valid = denom > 1e-6
+        lam = np.where(valid, sdd / denom, 0.0).astype(np.float32, copy=False)
+        u_phys = (-xg * sb + yg * cb) * lam
+        u_idx = (u_phys / du + u0).astype(np.float32, copy=False)
+        v_idx = (z_mm * lam / dv + v0).astype(np.float32, copy=False)
+        weight_bp = (lam * lam).astype(np.float32, copy=False)
+
+        sample = _bilinear_sample(proj_f, v_idx, u_idx)
+        out += sample * weight_bp
+
+        if p_idx == 0 or (p_idx + 1) % 10 == 0 or (p_idx + 1) == n_proj:
+            done = 2 + int(round((p_idx + 1) / max(1, n_proj) * 92.0))
+            _emit_progress(
+                progress_callback,
+                min(95, done),
+                100,
+                f"Preview: projection {p_idx + 1}/{n_proj}",
+            )
+
+    out *= np.float32(np.pi / float(max(1, n_proj)))
+    if int(config.refine_iterations) > 0:
+        _emit_progress(progress_callback, 96, 100, "Preview: applying post-refine diffusion...")
+        out = _refine_slice_diffusion(
+            out,
+            iterations=int(config.refine_iterations),
+            step=float(config.refine_step),
+        )
+    return out.astype(np.float32, copy=False)
+
+
+def run_reconstruction_preview_slice(
+    config: ReconstructionConfig,
+    projection_files: List[str],
+    z_index: Optional[int] = None,
+    progress_callback: ProgressCallback = None,
+    stop_requested: Optional[Callable[[], bool]] = None,
+) -> ReconstructionPreviewResult:
+    validate_config(config)
+    derived, angles_deg = build_stage1_plan(config)
+    if len(projection_files) != int(config.projection_count):
+        raise ValueError("Projection file count does not match config.projection_count.")
+
+    _emit_progress(progress_callback, 0, 100, "Checking projection data for preview...")
+    first = _load_projection(projection_files[0])
+    det_h, det_w = first.shape
+    nz = int(config.recon_nz)
+    if nz < 1:
+        raise ValueError("Invalid reconstruction depth: recon_nz must be >= 1.")
+
+    if z_index is None:
+        z_index = nz // 2
+    z_index = int(np.clip(int(z_index), 0, nz - 1))
+
+    preview_dir = os.path.join(config.output_folder, "proview")
+    os.makedirs(preview_dir, exist_ok=True)
+
+    backend_note = "Preview uses CPU single-slice FDK reconstruction."
+    if _is_iterative_algorithm(config.algorithm):
+        backend_note += " Iterative algorithm settings are ignored in preview."
+    _emit_progress(progress_callback, 1, 100, backend_note)
+
+    t0 = time.time()
+    preview_slice = _reconstruct_single_slice_fdk_cpu(
+        config=config,
+        projection_files=projection_files,
+        angles_deg=angles_deg,
+        det_h=det_h,
+        det_w=det_w,
+        voxel_x=float(derived.voxel_size_x_mm),
+        voxel_y=float(derived.voxel_size_y_mm),
+        voxel_z=float(derived.voxel_size_z_mm),
+        z_index=int(z_index),
+        progress_callback=progress_callback,
+        stop_requested=stop_requested,
+    )
+
+    if stop_requested and stop_requested():
+        raise RuntimeError("Reconstruction preview cancelled by user.")
+
+    preview_path = os.path.join(preview_dir, f"preview_z{int(z_index):05d}.tif")
+    tiff.imwrite(preview_path, preview_slice.astype(np.float32, copy=False), dtype=np.float32)
+    elapsed = float(time.time() - t0)
+    _emit_progress(progress_callback, 100, 100, f"Preview slice saved: {preview_path}")
+    return ReconstructionPreviewResult(
+        preview_path=preview_path,
+        preview_dir=preview_dir,
+        z_index=int(z_index),
+        elapsed_seconds=elapsed,
+        backend_used="cpu_numpy_fdk_single_slice",
+        backend_note=backend_note,
+    )
+
+
 def run_fdk_reconstruction(
     config: ReconstructionConfig,
     projection_files: List[str],
@@ -584,9 +785,9 @@ def run_fdk_reconstruction(
     validate_config(config)
     derived, angles_deg = build_stage1_plan(config)
     if len(projection_files) != int(config.projection_count):
-        raise ValueError("投影文件数与配置中的 projection_count 不一致。")
+        raise ValueError("Projection file count does not match config.projection_count.")
 
-    _emit_progress(progress_callback, 0, 100, "正在检查投影数据...")
+    _emit_progress(progress_callback, 0, 100, "Checking projection data...")
     first = _load_projection(projection_files[0])
     det_h, det_w = first.shape
 
@@ -642,7 +843,7 @@ def run_fdk_reconstruction(
         },
         "output_format": config.output_format,
         "backend_policy": "prefer_astra_cuda_then_cpu_fallback",
-        "note": "阶段3执行重构；优先 ASTRA CUDA，不可用时回退 CPU numpy FDK。",
+        "note": "Stage-3 reconstruction: prefer ASTRA CUDA; fallback to CPU numpy FDK when unavailable.",
     }
     with open(stage1_plan_path, "w", encoding="utf-8") as f:
         json.dump(stage1_payload, f, ensure_ascii=False, indent=2)
@@ -663,7 +864,55 @@ def run_fdk_reconstruction(
     iterative_iterations_used = 0
 
     astra_module, astra_import_error = _try_import_astra()
-    if astra_module is not None:
+    force_cpu = os.environ.get("RECON_FORCE_CPU", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    est_astra_bytes = _estimate_astra_required_bytes(
+        det_h=det_h,
+        det_w=det_w,
+        n_proj=n_proj,
+        nx=nx,
+        ny=ny,
+        nz=nz,
+    )
+    free_cuda_bytes = _get_cuda_free_bytes()
+    allow_astra = True
+    if force_cpu and astra_module is not None:
+        allow_astra = False
+        backend_note = "RECON_FORCE_CPU enabled; skip ASTRA and use CPU batched reconstruction."
+        _emit_progress(progress_callback, 2, 100, backend_note)
+
+    if astra_module is not None and free_cuda_bytes is not None:
+        projection_bytes = int(det_h) * int(det_w) * int(n_proj) * 4
+        try:
+            safe_ratio = float(os.environ.get("RECON_ASTRA_SAFE_RATIO", "0.60"))
+        except Exception:
+            safe_ratio = 0.60
+        safe_ratio = max(0.1, min(safe_ratio, 0.95))
+
+        try:
+            proj_ratio = float(os.environ.get("RECON_ASTRA_PROJ_RATIO", "0.55"))
+        except Exception:
+            proj_ratio = 0.55
+        proj_ratio = max(0.1, min(proj_ratio, 0.95))
+
+        if (est_astra_bytes > int(free_cuda_bytes * safe_ratio)) or (
+            projection_bytes > int(free_cuda_bytes * proj_ratio)
+        ):
+            allow_astra = False
+            need_gb = est_astra_bytes / (1024 ** 3)
+            free_gb = free_cuda_bytes / (1024 ** 3)
+            proj_gb = projection_bytes / (1024 ** 3)
+            backend_note = (
+                f"Estimated ASTRA memory need ~ {need_gb:.1f} GB "
+                f"(projection stack ~ {proj_gb:.1f} GB), available ~ {free_gb:.1f} GB; "
+                "skip ASTRA and use CPU batched reconstruction."
+            )
+            _emit_progress(progress_callback, 2, 100, backend_note)
+    if astra_module is not None and allow_astra:
         try:
             backend_info = _run_astra_reconstruction(
                 astra_module=astra_module,
@@ -684,8 +933,8 @@ def run_fdk_reconstruction(
             iterative_iterations_used = int(backend_info.get("iterative_iterations_used", 0))
         except Exception as e:
             if stop_requested and stop_requested():
-                raise RuntimeError("用户中止重构。") from e
-            backend_note = f"ASTRA 失败，已回退 CPU FDK: {e}"
+                raise RuntimeError("Reconstruction cancelled by user.") from e
+            backend_note = f"ASTRA failed, falling back to CPU FDK: {e}"
             _emit_progress(progress_callback, 2, 100, backend_note)
             backend_info = _run_fdk_reconstruction_cpu(
                 config=config,
@@ -703,14 +952,14 @@ def run_fdk_reconstruction(
             backend_used = str(backend_info.get("backend", "cpu_numpy_fdk"))
             z_batch_size = int(backend_info.get("z_batch_size", 0))
             iterative_iterations_used = int(backend_info.get("iterative_iterations_used", 0))
-    else:
+    elif astra_module is None:
         if _is_iterative_algorithm(config.algorithm):
             backend_note = (
-                "ASTRA 不可用，迭代算法无法执行；已降级为 CPU numpy FDK。"
+                "ASTRA unavailable; iterative algorithm cannot run, fallback to CPU numpy FDK. "
                 f" import_error={astra_import_error or 'unknown'}"
             )
         else:
-            backend_note = f"ASTRA 不可用，使用 CPU numpy FDK: {astra_import_error or 'unknown'}"
+            backend_note = f"ASTRA unavailable, using CPU numpy FDK: {astra_import_error or 'unknown'}"
         _emit_progress(progress_callback, 2, 100, backend_note)
         backend_info = _run_fdk_reconstruction_cpu(
             config=config,
@@ -728,7 +977,23 @@ def run_fdk_reconstruction(
         backend_used = str(backend_info.get("backend", "cpu_numpy_fdk"))
         z_batch_size = int(backend_info.get("z_batch_size", 0))
         iterative_iterations_used = int(backend_info.get("iterative_iterations_used", 0))
-
+    else:
+        backend_info = _run_fdk_reconstruction_cpu(
+            config=config,
+            projection_files=projection_files,
+            angles_deg=angles_deg,
+            det_h=det_h,
+            det_w=det_w,
+            output_slice_dir=output_slice_dir,
+            voxel_x=voxel_x,
+            voxel_y=voxel_y,
+            voxel_z=voxel_z,
+            progress_callback=progress_callback,
+            stop_requested=stop_requested,
+        )
+        backend_used = str(backend_info.get("backend", "cpu_numpy_fdk"))
+        z_batch_size = int(backend_info.get("z_batch_size", 0))
+        iterative_iterations_used = int(backend_info.get("iterative_iterations_used", 0))
     elapsed = float(time.time() - t0)
     summary_path = os.path.join(config.output_folder, "run_summary_recon.json")
     summary_payload = {
@@ -754,7 +1019,7 @@ def run_fdk_reconstruction(
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary_payload, f, ensure_ascii=False, indent=2)
 
-    _emit_progress(progress_callback, 100, 100, "重构完成。")
+    _emit_progress(progress_callback, 100, 100, "Reconstruction completed.")
     return ReconstructionRunResult(
         output_slice_dir=output_slice_dir,
         summary_json_path=summary_path,
@@ -766,3 +1031,4 @@ def run_fdk_reconstruction(
         backend_used=backend_used,
         backend_note=backend_note,
     )
+

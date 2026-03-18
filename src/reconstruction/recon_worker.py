@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import json
 import sys
 import traceback
@@ -51,7 +51,7 @@ def main() -> int:
         config_payload.setdefault("iterative_iterations", 0)
 
         if not isinstance(projection_files, list):
-            raise ValueError("projection_files JSON 必须是字符串数组。")
+            raise ValueError("projection_files JSON must be a list of strings.")
         projection_files = [str(x) for x in projection_files]
 
         config = ReconstructionConfig(**config_payload)
@@ -76,3 +76,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

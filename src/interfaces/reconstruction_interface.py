@@ -11,10 +11,13 @@ from typing import List, Optional, Tuple
 
 import imageio.v3 as iio
 import numpy as np
+from PyQt5.QtCore import QEvent, QObject, Qt
+from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -34,11 +37,16 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from src.interfaces.ui_theme import apply_interface_theme, set_button_role
+from src.reconstruction.fdk_runner import (
+    ReconstructionPreviewResult,
+    ReconstructionRunResult,
+    run_fdk_reconstruction,
+    run_reconstruction_preview_slice,
+)
 from src.reconstruction.io_loader import collect_projection_files
 from src.reconstruction.models import ReconstructionConfig
 from src.reconstruction.pipeline import build_stage1_plan, validate_config
-from src.reconstruction.fdk_runner import ReconstructionRunResult, run_fdk_reconstruction
-from src.interfaces.ui_theme import apply_interface_theme, set_button_role
 
 
 class ReconstructionInterface(QMainWindow):
@@ -222,6 +230,8 @@ class ReconstructionInterface(QMainWindow):
         form = QFormLayout()
 
         self.algorithm_combo = QComboBox()
+        self.algorithm_combo.setProperty("_allow_wheel_change", False)
+        self.algorithm_combo.setFocusPolicy(Qt.StrongFocus)
         self.algorithm_combo.addItems(
             [
                 "FDK (Cone-beam)",
@@ -234,6 +244,8 @@ class ReconstructionInterface(QMainWindow):
         form.addRow("重构算法", self.algorithm_combo)
 
         self.filter_combo = QComboBox()
+        self.filter_combo.setProperty("_allow_wheel_change", False)
+        self.filter_combo.setFocusPolicy(Qt.StrongFocus)
         self.filter_combo.addItems(["Ram-Lak", "Shepp-Logan", "Hann", "Hamming"])
         form.addRow("滤波器", self.filter_combo)
 
@@ -276,6 +288,8 @@ class ReconstructionInterface(QMainWindow):
         form.addRow("后处理扩散步长", self.refine_step_spin)
 
         self.output_format_combo = QComboBox()
+        self.output_format_combo.setProperty("_allow_wheel_change", False)
+        self.output_format_combo.setFocusPolicy(Qt.StrongFocus)
         self.output_format_combo.addItems(["TIFF 切片"])
         form.addRow("输出格式", self.output_format_combo)
 
@@ -342,6 +356,11 @@ class ReconstructionInterface(QMainWindow):
         self.run_btn.clicked.connect(self.on_run_clicked)
         btn_row.addWidget(self.run_btn)
 
+        self.preview_btn = QPushButton("预览中间切片")
+        set_button_role(self.preview_btn, "primary")
+        self.preview_btn.clicked.connect(self.on_preview_middle_clicked)
+        btn_row.addWidget(self.preview_btn)
+
         self.stop_btn = QPushButton("停止")
         set_button_role(self.stop_btn, "danger")
         self.stop_btn.setEnabled(False)
@@ -357,7 +376,9 @@ class ReconstructionInterface(QMainWindow):
         group.setLayout(layout)
         return group
 
-    def _build_folder_row(self, parent_layout: QVBoxLayout, title: str, slot) -> QLineEdit:
+    def _build_folder_row(
+        self, parent_layout: QVBoxLayout, title: str, slot
+    ) -> QLineEdit:
         row = QHBoxLayout()
         label = QLabel(title)
         edit = QLineEdit()
@@ -396,7 +417,9 @@ class ReconstructionInterface(QMainWindow):
         iterative_mode = ("sirt" in algo_text) or ("cgls" in algo_text)
         self.iterative_iter_spin.setEnabled(iterative_mode)
 
-    def _prepare_projection_for_cor_search(self, image: np.ndarray, downsample: int) -> np.ndarray:
+    def _prepare_projection_for_cor_search(
+        self, image: np.ndarray, downsample: int
+    ) -> np.ndarray:
         arr = np.asarray(image, dtype=np.float32)
         if arr.ndim == 3:
             arr = arr[:, :, 0]
@@ -416,7 +439,9 @@ class ReconstructionInterface(QMainWindow):
         arr = (arr - row_mean) / row_std
         return arr.astype(np.float32, copy=False)
 
-    def _mirror_shift_l1_score(self, a: np.ndarray, b_flip: np.ndarray, shift: int) -> float:
+    def _mirror_shift_l1_score(
+        self, a: np.ndarray, b_flip: np.ndarray, shift: int
+    ) -> float:
         h, w = a.shape
         if b_flip.shape != (h, w):
             raise ValueError("COR 搜索图像尺寸不一致。")
@@ -447,7 +472,9 @@ class ReconstructionInterface(QMainWindow):
         b = self._prepare_projection_for_cor_search(proj_b, downsample)
         b_flip = np.flip(b, axis=1)
 
-        max_shift_ds = max(1, int(np.ceil((2.0 * float(search_range_px)) / float(downsample))))
+        max_shift_ds = max(
+            1, int(np.ceil((2.0 * float(search_range_px)) / float(downsample)))
+        )
         shifts = np.arange(-max_shift_ds, max_shift_ds + 1, dtype=np.int32)
         scores = np.empty(shifts.shape[0], dtype=np.float64)
 
@@ -462,7 +489,7 @@ class ReconstructionInterface(QMainWindow):
             y_m1 = float(scores[best_idx - 1])
             y_0 = float(scores[best_idx])
             y_p1 = float(scores[best_idx + 1])
-            denom = (y_m1 - 2.0 * y_0 + y_p1)
+            denom = y_m1 - 2.0 * y_0 + y_p1
             if abs(denom) > 1e-12:
                 delta = 0.5 * (y_m1 - y_p1) / denom
                 delta = float(np.clip(delta, -1.0, 1.0))
@@ -498,12 +525,16 @@ class ReconstructionInterface(QMainWindow):
         if pair_offset <= 0 or pair_offset >= len(projection_files):
             pair_offset = len(projection_files) // 2
         if pair_offset <= 0 or pair_offset >= len(projection_files):
-            QMessageBox.warning(self, "提示", "无法构建 COR 搜索配对，请检查投影数量和角度设置。")
+            QMessageBox.warning(
+                self, "提示", "无法构建 COR 搜索配对，请检查投影数量和角度设置。"
+            )
             return
 
         usable_count = len(projection_files) - pair_offset
         num_pairs = int(min(5, max(1, usable_count)))
-        pair_indices = np.linspace(0, usable_count - 1, num=num_pairs, dtype=np.int32).tolist()
+        pair_indices = np.linspace(
+            0, usable_count - 1, num=num_pairs, dtype=np.int32
+        ).tolist()
 
         search_range = int(self.cor_search_range_spin.value())
         downsample = int(self.cor_search_downsample_spin.value())
@@ -657,8 +688,12 @@ class ReconstructionInterface(QMainWindow):
                 except Exception:
                     pass
 
-        stdout_thread = threading.Thread(target=_reader, args=("stdout", process.stdout), daemon=True)
-        stderr_thread = threading.Thread(target=_reader, args=("stderr", process.stderr), daemon=True)
+        stdout_thread = threading.Thread(
+            target=_reader, args=("stdout", process.stdout), daemon=True
+        )
+        stderr_thread = threading.Thread(
+            target=_reader, args=("stderr", process.stderr), daemon=True
+        )
         stdout_thread.start()
         stderr_thread.start()
 
@@ -712,7 +747,9 @@ class ReconstructionInterface(QMainWindow):
                 stderr_tail = "\n".join(stderr_lines[-20:]).strip()
                 if not stderr_tail:
                     stderr_tail = "子进程异常退出，但没有可用 stderr 输出。"
-                raise RuntimeError(f"阶段3子进程重构失败 (exit={return_code})\n{stderr_tail}")
+                raise RuntimeError(
+                    f"阶段3子进程重构失败 (exit={return_code})\n{stderr_tail}"
+                )
 
             if not os.path.exists(result_json_path):
                 raise RuntimeError("阶段3子进程未生成 result.json。")
@@ -748,7 +785,9 @@ class ReconstructionInterface(QMainWindow):
         self._update_derived_fields()
         return count
 
-    def _detect_projection_shape(self, projection_files: List[str]) -> Optional[Tuple[int, int]]:
+    def _detect_projection_shape(
+        self, projection_files: List[str]
+    ) -> Optional[Tuple[int, int]]:
         if not projection_files:
             return None
         first_path = projection_files[0]
@@ -769,7 +808,10 @@ class ReconstructionInterface(QMainWindow):
         shape: Optional[Tuple[int, int]],
         log_change: bool,
     ):
-        auto_enabled = hasattr(self, "auto_volume_checkbox") and self.auto_volume_checkbox.isChecked()
+        auto_enabled = (
+            hasattr(self, "auto_volume_checkbox")
+            and self.auto_volume_checkbox.isChecked()
+        )
         if not auto_enabled or shape is None:
             return
         proj_h, proj_w = shape
@@ -806,7 +848,9 @@ class ReconstructionInterface(QMainWindow):
                 self.recon_ny_spin.setEnabled(False)
                 self.recon_nz_spin.setEnabled(False)
 
-    def _build_config_and_files(self) -> Tuple[Optional[ReconstructionConfig], List[str]]:
+    def _build_config_and_files(
+        self,
+    ) -> Tuple[Optional[ReconstructionConfig], List[str]]:
         projection_folder = self.projection_edit.text().strip()
         output_folder = self.output_edit.text().strip()
         if not projection_folder:
@@ -833,9 +877,11 @@ class ReconstructionInterface(QMainWindow):
             detector_pixel_size_y_mm=float(self.pixel_y_spin.value()),
             cor_offset_px=float(self.cor_offset_spin.value()),
             algorithm=self.algorithm_combo.currentText(),
-            iterative_iterations=int(self.iterative_iter_spin.value())
-            if self.iterative_iter_spin.isEnabled()
-            else 0,
+            iterative_iterations=(
+                int(self.iterative_iter_spin.value())
+                if self.iterative_iter_spin.isEnabled()
+                else 0
+            ),
             filter_name=self.filter_combo.currentText(),
             recon_nx=int(self.recon_nx_spin.value()),
             recon_ny=int(self.recon_ny_spin.value()),
@@ -926,6 +972,7 @@ class ReconstructionInterface(QMainWindow):
 
         self._stop_requested = False
         self.run_btn.setEnabled(False)
+        self.preview_btn.setEnabled(False)
         self.validate_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.clear_log_btn.setEnabled(False)
@@ -948,7 +995,9 @@ class ReconstructionInterface(QMainWindow):
 
         def on_progress(done: int, total: int, message: str):
             total_safe = max(1, int(total))
-            percent = int(max(0, min(100, round((float(done) / float(total_safe)) * 100.0))))
+            percent = int(
+                max(0, min(100, round((float(done) / float(total_safe)) * 100.0)))
+            )
             self.progress_bar.setValue(percent)
             if done == 0 or done == total_safe or (done % 5 == 0):
                 self._log(message)
@@ -989,10 +1038,123 @@ class ReconstructionInterface(QMainWindow):
             self._log(f"运行失败: {e}")
         finally:
             self.run_btn.setEnabled(True)
+            self.preview_btn.setEnabled(True)
             self.validate_btn.setEnabled(True)
             self.stop_btn.setEnabled(False)
             self.clear_log_btn.setEnabled(True)
             self._stop_requested = False
+
+    def on_preview_middle_clicked(self):
+        self.progress_bar.setValue(0)
+        config, projection_files = self._build_config_and_files()
+        if config is None:
+            return
+
+        preview_z = int(max(0, config.recon_nz // 2))
+        self._stop_requested = False
+        self.run_btn.setEnabled(False)
+        self.preview_btn.setEnabled(False)
+        self.validate_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self.clear_log_btn.setEnabled(False)
+
+        self._log("-" * 60)
+        self._log(f"Start preview reconstruction (middle slice): z={preview_z}")
+
+        def on_progress(done: int, total: int, message: str):
+            total_safe = max(1, int(total))
+            percent = int(
+                max(0, min(100, round((float(done) / float(total_safe)) * 100.0)))
+            )
+            self.progress_bar.setValue(percent)
+            if done == 0 or done == total_safe or (done % 5 == 0):
+                self._log(message)
+            QApplication.processEvents()
+
+        try:
+            preview_result = run_reconstruction_preview_slice(
+                config=config,
+                projection_files=projection_files,
+                z_index=preview_z,
+                progress_callback=on_progress,
+                stop_requested=lambda: self._stop_requested,
+            )
+            self.progress_bar.setValue(100)
+            self._log(f"Preview slice done: z={preview_result.z_index}")
+            self._log(f"Preview output: {preview_result.preview_path}")
+            if preview_result.backend_note:
+                self._log(f"Preview note: {preview_result.backend_note}")
+            self._show_preview_dialog(preview_result)
+        except Exception as e:
+            self.progress_bar.setValue(0)
+            QMessageBox.critical(self, "预览失败", str(e))
+            self._log(f"Preview failed: {e}")
+        finally:
+            self.run_btn.setEnabled(True)
+            self.preview_btn.setEnabled(True)
+            self.validate_btn.setEnabled(True)
+            self.stop_btn.setEnabled(False)
+            self.clear_log_btn.setEnabled(True)
+            self._stop_requested = False
+
+    def _normalize_preview_image(self, image: np.ndarray) -> np.ndarray:
+        arr = np.asarray(image, dtype=np.float32)
+        if arr.ndim == 3:
+            arr = arr[:, :, 0]
+        if arr.ndim != 2:
+            raise ValueError(f"Unsupported preview image shape: {arr.shape}")
+
+        finite = np.isfinite(arr)
+        if not np.any(finite):
+            return np.zeros(arr.shape, dtype=np.uint8)
+
+        valid = arr[finite]
+        lo = float(np.percentile(valid, 1.0))
+        hi = float(np.percentile(valid, 99.0))
+        if (not np.isfinite(lo)) or (not np.isfinite(hi)) or (hi <= lo):
+            lo = float(np.min(valid))
+            hi = float(np.max(valid))
+        if hi <= lo:
+            return np.zeros(arr.shape, dtype=np.uint8)
+
+        normalized = np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
+        out = np.asarray(np.round(normalized * 255.0), dtype=np.uint8)
+        out[~finite] = 0
+        return out
+
+    def _show_preview_dialog(self, preview_result: ReconstructionPreviewResult):
+        image = iio.imread(preview_result.preview_path)
+        preview_u8 = self._normalize_preview_image(image)
+        h, w = preview_u8.shape
+        qimg = QImage(
+            preview_u8.data,
+            int(w),
+            int(h),
+            int(preview_u8.strides[0]),
+            QImage.Format_Grayscale8,
+        ).copy()
+        pixmap = QPixmap.fromImage(qimg)
+        pixmap = pixmap.scaled(960, 720, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Preview z={preview_result.z_index}")
+        layout = QVBoxLayout(dialog)
+
+        image_label = QLabel()
+        image_label.setAlignment(Qt.AlignCenter)
+        image_label.setPixmap(pixmap)
+        layout.addWidget(image_label)
+
+        info_label = QLabel(preview_result.preview_path)
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+
+        dialog.resize(min(1100, pixmap.width() + 80), min(900, pixmap.height() + 150))
+        dialog.exec_()
 
     def on_stop_clicked(self):
         self._stop_requested = True

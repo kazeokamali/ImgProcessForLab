@@ -4,7 +4,14 @@ from typing import Tuple
 
 from PyQt5.QtCore import QEvent, QObject, Qt
 from PyQt5.QtGui import QFont, QFontDatabase
-from PyQt5.QtWidgets import QApplication, QComboBox, QLayout, QPushButton, QWidget
+from PyQt5.QtWidgets import (
+    QApplication,
+    QAbstractSpinBox,
+    QComboBox,
+    QLayout,
+    QPushButton,
+    QWidget,
+)
 
 
 APP_STYLESHEET = """
@@ -214,25 +221,44 @@ def _pick_font_family() -> str:
 
 
 class _ComboBoxWheelGuard(QObject):
-    """Prevent accidental combo-box changes on mouse wheel hover."""
+    """Disable accidental wheel-based value changes on combo/spin inputs."""
+
+    @staticmethod
+    def _find_combo_owner(obj):
+        current = obj
+        while current is not None:
+            if isinstance(current, QComboBox):
+                return current
+            current = current.parent()
+        return None
+
+    @staticmethod
+    def _find_spin_owner(obj):
+        current = obj
+        while current is not None:
+            if isinstance(current, QAbstractSpinBox):
+                return current
+            current = current.parent()
+        return None
 
     def eventFilter(self, obj, event):
-        if isinstance(obj, QComboBox):
-            if event.type() == QEvent.MouseButtonPress:
-                obj.setProperty("_wheel_combo_active", True)
-                return False
-
-            if event.type() == QEvent.FocusOut:
-                obj.setProperty("_wheel_combo_active", False)
-                return False
-
+        combo = self._find_combo_owner(obj)
+        if combo is not None:
             if event.type() == QEvent.Wheel:
-                popup_visible = obj.view().isVisible() if obj.view() is not None else False
-                wheel_enabled = bool(obj.property("_wheel_combo_active"))
-                if popup_visible or (wheel_enabled and obj.hasFocus()):
-                    return False
-                event.ignore()
-                return True
+                # Opt-in switch for pages/widgets that explicitly want wheel changes.
+                allow_wheel = bool(combo.property("_allow_wheel_change"))
+                if not allow_wheel:
+                    event.ignore()
+                    return True
+
+        spin = self._find_spin_owner(obj)
+        if spin is not None:
+            if event.type() == QEvent.Wheel:
+                # Opt-in switch for pages/widgets that explicitly want wheel changes.
+                allow_wheel = bool(spin.property("_allow_wheel_change"))
+                if not allow_wheel:
+                    event.ignore()
+                    return True
 
         return super().eventFilter(obj, event)
 
@@ -253,6 +279,9 @@ def apply_app_theme(app: QApplication) -> None:
 
 def apply_interface_theme(widget: QWidget) -> None:
     widget.setAttribute(Qt.WA_StyledBackground, True)
+    app = QApplication.instance()
+    if app is not None:
+        _install_combobox_wheel_guard(app)
 
 
 def set_button_role(button: QPushButton, role: str) -> None:
